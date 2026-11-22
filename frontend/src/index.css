@@ -1,0 +1,40 @@
+@import "tailwindcss";
+
+/* QuikE palette: Canada red for action, black for text and dark panels, white surfaces. */
+@theme {
+  --color-brand-50: #fdeceb;
+  --color-brand-100: #fbd6d3;
+  --color-brand-200: #f5aaa4;
+  --color-brand-500: #d52b1e;
+  --color-brand-600: #b72318;
+  --color-brand-700: #8e1b13;
+  --color-ink: #0c0c0d;
+  --color-paper: #f6f6f6;
+  --color-line: #e6e6e6;
+  --color-muted: #686868;
+  --font-display: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+html, body, #root { min-height: 100%; }
+body { @apply bg-paper text-ink font-sans antialiased; }
+h1, h2, h3 { @apply font-display; text-wrap: balance; }
+
+/* Native <dialog> gives us focus trapping and Esc-to-close for free. */
+dialog.modal { margin: auto; width: min(560px, calc(100vw - 24px)); max-height: calc(100dvh - 32px); border-radius: 22px; padding: 0; border: 0; }
+dialog.drawer { margin: 0 0 0 auto; width: min(440px, 100vw); height: 100dvh; max-height: 100dvh; padding: 0; border: 0; }
+dialog::backdrop { background: rgb(24 23 28 / 0.45); backdrop-filter: blur(2px); }
+dialog[open].drawer { animation: slide-in 0.2s ease-out; }
+@keyframes slide-in { from { transform: translateX(24px); opacity: 0; } }
+
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.tabular { font-variant-numeric: tabular-nums; }
+
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+/* Landing page product rows that drift sideways (paused on hover, off for reduced motion). */
+@keyframes marquee { to { transform: translateX(-50%); } }
+.marquee { animation: marquee 40s linear infinite; }
+.marquee-reverse { animation-direction: reverse; }
+.marquee-row:hover .marquee { animation-play-state: paused; }
