@@ -5,14 +5,14 @@ A delivery platform for small local shops in Canada. Shops list what they have i
 This repository is the **backend**: one Spring Boot app and one Postgres database that every screen talks to.
 
 - [What the project is](#what-the-project-is)
-- [What is built](#what-is-built)
+- [Project status](#project-status): what is done and what is left
 - [How it is put together](#how-it-is-put-together)
 - [How it works](#how-it-works)
 - [Endpoints](#endpoints)
 - [How to start the project](#how-to-start-the-project)
+- [Deploying](#deploying)
 - [Configuration](#configuration)
 - [Tests](#tests)
-- [Not built yet](#not-built-yet)
 
 ---
 
@@ -31,25 +31,53 @@ The platform adds its markup on top of the shop's price (1.5x by default, set by
 
 ---
 
-## What is built
+## Project status
 
-| Part | Status | What it does |
-|---|---|---|
-| Auth | Done | Sign up, log in, roles (shop, customer, driver, admin), login limits |
-| Shop | Done | Shop profile and location, admin approval |
-| Catalog | Done | Shared product list, shop requests for new products, admin review |
-| Shop products and stock | Done | Each shop's price and stock count for catalog products |
-| Orders | Done | Place, accept, reject, mark ready, cancel, auto-expire |
-| Browsing | Done | Product-first feed, change shop, search inside one shop |
-| Drivers and delivery | Done | Driver approval, online status, location pings, job list, pickup, delivery code |
-| Customer tracking | Done | Driver's live position on the map, after pickup only |
-| Admin | Done | Dashboard, order board, cancel, assign drivers by hand, prices and fees, opening hours, suspend accounts |
-| Health check | Done | `/actuator/health` for the host and load balancer |
-| Payments | Not yet | Orders are free to place for now |
-| Sales tax | Not yet | Waiting on the launch province |
-| Password reset | Not yet | Needs an email provider |
+The backend is complete for running the platform and ready to deploy. Three features wait on outside decisions (payments, sales tax, password reset). The four frontends are separate and not in this repository; they call the endpoints below.
 
-The frontends (shop website, admin, customer app, driver app) are separate and not in this repository. They call the endpoints below.
+### Done
+
+| Part | What it does |
+|---|---|
+| Accounts | Sign up and log in as shop, customer or driver; admin from config; login limits; suspended accounts are locked out at once |
+| Shops | Profile and location, admin approval, opening hours set by admin in the shop's local time |
+| Catalog and stock | Shared product list, shop requests for new products, admin review, each shop's price and stock |
+| Orders | Place, accept (with missing items), reject, mark ready, cancel, auto-expire; safe against double taps and overselling |
+| Browsing | Product-first feed, change shop, search inside one shop, distance and delivery time; shop location kept private |
+| Drivers and delivery | Driver approval, online status, location pings, job list, pickup, delivery code, history |
+| Customer tracking | Driver's live position on the map, after pickup only |
+| Admin | Dashboard, order board, cancel, assign drivers by hand, markup per category, delivery fee, driver pay |
+| Production basics | Health check, rate limits, overload protection, security tests, race tests, load tests |
+
+### Left
+
+**Waiting on a decision**
+
+| Feature | Needs |
+|---|---|
+| Payments: hold the card, charge, refund, pay out shops and drivers | A Stripe account. The places in the code are marked in `OrderService`. |
+| Sales tax in order totals | The launch province. Each product already has a tax category. |
+| Password reset | An email provider |
+
+**Deferred**
+
+- **Push notifications.** Shops, drivers and customers poll for updates for now.
+- **Image upload.** Products have an `imageUrl` text field only.
+
+**Later**
+
+- **Phone login for customers.** Needs an SMS provider. Customers use email and password for now, so drivers have no customer phone number to call.
+- **Refresh tokens.** Logins last 12 hours.
+- **Multi-shop carts.** One order goes to one shop.
+
+**Outside this repository**
+
+| Step | Status |
+|---|---|
+| Deployment | Ready: pick a host, then follow [Deploying](#deploying) |
+| Shop website and admin screens (Next.js) | Not in this repository |
+| Customer app and driver app (Expo) | Not in this repository |
+| Pilot with 3 to 5 shops, then app store release | After deployment and the apps |
 
 ---
 
@@ -158,6 +186,19 @@ A placed order keeps its prices, fee and driver pay forever, so a later settings
 - **Races between people** (shop accepts while the customer cancels, 20 drivers accept one job) always end with exactly one winner.
 - **Limits:** 5 wrong passwords per email in 15 minutes, 60 signups or logins per IP per minute, 5 delivery code tries per order, request bodies up to 64 KB, pages up to 100 rows.
 - **Overload:** if the database is busy, a request waits at most 3 seconds and then gets `503` with `Retry-After: 2`, instead of hanging. No query may run longer than 5 seconds.
+
+Measured on a laptop, with the app, database and load tool on one machine, so treat these as a floor rather than production numbers. Browsing and admin used 120 shops and 30,000 stocked products; the driver and tracking rows used 100 online drivers and 2,000 finished deliveries. No request failed.
+
+| Request | Clients at once | Requests per second | 95% answered within |
+|---|---|---|---|
+| Home feed | 50 | 800 | 130 ms |
+| Search | 50 | 1,900 | 56 ms |
+| Change-shop list | 200 | 10,500 | 52 ms |
+| Driver location ping | 100 | 12,400 | 15 ms |
+| Driver job list | 400 | 11,000 | 53 ms |
+| Customer tracking | 200 | 15,600 | 33 ms |
+| Admin order board | 50 | 5,400 | 17 ms |
+| Login (deliberately slow password check) | 50 users | 96 | 720 ms |
 
 ---
 
@@ -437,14 +478,14 @@ mvn spring-boot:test-run
 
 ### Try it from the terminal
 
-With the app running, this signs up a shop, has admin approve it, and lists the shop's products:
+With the app running, this signs up a shop, has admin approve it and open it every day, and shows the shop:
 
 ```bash
 SHOP=$(curl -s -X POST localhost:8080/api/auth/signup -H 'Content-Type: application/json' \
   -d '{"email":"owner@demo.test","password":"demo-pass-123","name":"Demo Owner"}' | sed 's/.*"token":"\([^"]*\)".*/\1/')
 
 curl -s -X PUT localhost:8080/api/shops/me -H "Authorization: Bearer $SHOP" -H 'Content-Type: application/json' \
-  -d '{"name":"Demo Mart","phone":"+1 604 555 0199","addressLine":"1 King St","city":"Surrey","province":"BC","postalCode":"V3T 1A1","latitude":49.19,"longitude":-122.85,"hours":[]}'
+  -d '{"name":"Demo Mart","phone":"+1 604 555 0199","addressLine":"1 King St","city":"Surrey","province":"BC","postalCode":"V3T 1A1","latitude":49.19,"longitude":-122.85}'
 
 ADMIN=$(curl -s -X POST localhost:8080/api/auth/login -H 'Content-Type: application/json' \
   -d '{"email":"admin@quickcommerce.test","password":"dev-admin-pass-1"}' | sed 's/.*"token":"\([^"]*\)".*/\1/')
@@ -452,16 +493,33 @@ ADMIN=$(curl -s -X POST localhost:8080/api/auth/login -H 'Content-Type: applicat
 curl -s -X PUT localhost:8080/api/admin/shops/1/status -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
   -d '{"status":"APPROVED"}'
 
-curl -s localhost:8080/api/shops/me/products -H "Authorization: Bearer $SHOP"
+curl -s -X PUT localhost:8080/api/admin/shops/1/hours -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+  -d '{"hours":[{"dayOfWeek":"MONDAY","opens":"00:00","closes":"23:59:59"},{"dayOfWeek":"TUESDAY","opens":"00:00","closes":"23:59:59"},{"dayOfWeek":"WEDNESDAY","opens":"00:00","closes":"23:59:59"},{"dayOfWeek":"THURSDAY","opens":"00:00","closes":"23:59:59"},{"dayOfWeek":"FRIDAY","opens":"00:00","closes":"23:59:59"},{"dayOfWeek":"SATURDAY","opens":"00:00","closes":"23:59:59"},{"dayOfWeek":"SUNDAY","opens":"00:00","closes":"23:59:59"}]}'
+
+curl -s localhost:8080/api/shops/me -H "Authorization: Bearer $SHOP"
 ```
 
-### Health check
+---
 
-`GET /actuator/health` answers `{"status":"UP"}` without a login when the app and its database are working. Point your host's health check and load balancer at it. No other actuator endpoint is exposed.
+## Deploying
 
-### Run against a real Postgres
+The app is one jar plus one Postgres 17 database. Any host that runs Java 21 works. Flyway creates and updates the tables when the app starts, so there is no separate database step.
 
-For a shared server or production, use a real Postgres 17 database. Flyway creates and updates the tables when the app starts.
+### Checklist
+
+1. **Database:** a managed Postgres 17, with daily backups switched on.
+2. **Secrets:** set `DATABASE_URL`, `DATABASE_USER`, `DATABASE_PASSWORD`, a fresh random `JWT_SECRET` (at least 32 characters), and `ADMIN_EMAIL` and `ADMIN_PASSWORD` for the first admin.
+3. **HTTPS:** put the app behind the host's proxy or load balancer, and set `FORWARD_HEADERS_STRATEGY=native`.
+4. **Frontends:** set `CORS_ALLOWED_ORIGINS` to the shop and admin website's address.
+5. **Health check:** point the host at `GET /actuator/health`. It answers `{"status":"UP"}` without a login when the app and its database are working, and gives no other details. No other actuator endpoint is exposed.
+6. **API docs:** set `API_DOCS_ENABLED=false` if the Swagger page should not be public.
+7. **After the first start:** log in as admin, set the price settings if 1.5x, $4.99 and $4.99 are not right, then approve shops and set their opening hours.
+
+### Run the jar
+
+```bash
+cd backend
+```
 
 ```bash
 mvn package -DskipTests
@@ -479,7 +537,9 @@ java -jar target/backend-0.0.1-SNAPSHOT.jar
 
 The app refuses to start without `JWT_SECRET` (at least 32 characters), so it can never run with a known secret.
 
-**Behind a load balancer or proxy**, also set `FORWARD_HEADERS_STRATEGY=native`. Otherwise every user appears to come from the proxy's IP, and the per-IP login limit would block everyone.
+**Behind a load balancer or proxy**, `FORWARD_HEADERS_STRATEGY=native` is required. Without it every user appears to come from the proxy's IP, and the per-IP login limit would block everyone.
+
+**More than one server:** the login limits and the suspended-account list are kept in each server's memory. With two servers each one counts on its own, and a suspension reaches the other server within 30 seconds.
 
 ---
 
@@ -521,16 +581,3 @@ Markup, delivery fee, driver pay and opening hours are not configuration: admin 
 | `SecurityTest` | Forged tokens, SQL injection, oversized bodies, error leaks |
 | `ConcurrencyTest`, `OrderConcurrencyTest`, `DriverConcurrencyTest`, `AdminConcurrencyTest` | Many requests at the same moment: stock never oversold, one winner per race, no deadlocks, admin actions racing shops and drivers |
 | `IpThrottleTest`, `PingThrottleTest`, `auth/ThrottleTest` | Rate limits |
-
----
-
-## Not built yet
-
-- **Payments.** Orders cost nothing to place. The places where the card will be held, charged and refunded are marked in `OrderService`. Needs a Stripe account.
-- **Sales tax.** Depends on the launch province. Each product already has a tax category.
-- **Password reset.** Needs an email provider.
-- **Push notifications.** Shops, drivers and customers poll for updates.
-- **Image upload.** Products have an `imageUrl` text field only.
-- **Multi-shop carts.** One order goes to one shop for now.
-- **Phone login for customers.** Customers use email and password.
-- **Refresh tokens.** Logins last 12 hours.
