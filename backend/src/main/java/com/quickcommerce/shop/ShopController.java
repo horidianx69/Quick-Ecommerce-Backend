@@ -1,7 +1,6 @@
 package com.quickcommerce.shop;
 
 import com.quickcommerce.common.Canada;
-import com.quickcommerce.shop.Shop.Hours;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.DecimalMax;
 import jakarta.validation.constraints.DecimalMin;
@@ -9,8 +8,6 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
-import java.util.List;
-import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.transaction.annotation.Transactional;
@@ -19,7 +16,6 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/shops/me")
@@ -37,8 +33,7 @@ public class ShopController {
             @NotBlank @Pattern(regexp = Canada.POSTAL_CODE,
                     message = "must be a Canadian postal code") String postalCode,
             @NotNull @DecimalMin("-90") @DecimalMax("90") Double latitude,
-            @NotNull @DecimalMin("-180") @DecimalMax("180") Double longitude,
-            @NotNull @Size(max = 7) List<@Valid @NotNull Hours> hours) {}
+            @NotNull @DecimalMin("-180") @DecimalMax("180") Double longitude) {}
 
     private final ShopRepository shops;
     private final ShopService shopService;
@@ -53,14 +48,16 @@ public class ShopController {
         return shopService.requireShop(jwt);
     }
 
-    /** Creates the caller's shop (status PENDING) or updates it. Status is never set from here. */
+    /**
+     * Creates the caller's shop (status PENDING) or updates it. Status and
+     * opening hours are never set from here: admin sets both.
+     */
     @PutMapping
     @Transactional
     Shop upsert(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody ShopRequest req) {
-        validateHours(req.hours());
         Long ownerId = Long.valueOf(jwt.getSubject());
-        // Row lock: two saves of the same shop (a double-clicked Save) run in turn
-        // instead of both rewriting the hours rows at once.
+        // Row lock: two saves of the same shop (a double-clicked Save), or a save
+        // and an admin hours change, run in turn instead of at once.
         Shop shop = shops.findWithLockByOwnerId(ownerId).orElseGet(() -> {
             Shop fresh = new Shop();
             fresh.setOwnerId(ownerId);
@@ -72,19 +69,9 @@ public class ShopController {
         shop.setAddressLine(req.addressLine().trim());
         shop.setCity(req.city().trim());
         shop.setProvince(req.province());
+        shop.setTimeZone(Canada.timeZone(req.province()));
         shop.setPostalCode(req.postalCode().toUpperCase());
         shop.moveTo(req.latitude(), req.longitude());
-        shop.getHours().clear();
-        shop.getHours().addAll(req.hours());
         return shops.save(shop);
-    }
-
-    private static void validateHours(List<Hours> hours) {
-        if (hours.stream().map(Hours::dayOfWeek).distinct().count() != hours.size()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Each day can appear once in hours");
-        }
-        if (hours.stream().anyMatch(h -> !h.closes().isAfter(h.opens()))) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "closes must be after opens");
-        }
     }
 }

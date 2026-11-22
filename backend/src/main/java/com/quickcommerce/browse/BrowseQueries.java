@@ -1,6 +1,7 @@
 package com.quickcommerce.browse;
 
 import com.quickcommerce.common.Geo;
+import com.quickcommerce.shop.Shop;
 import java.util.List;
 import java.util.Optional;
 import javax.sql.DataSource;
@@ -13,7 +14,8 @@ import org.springframework.stereotype.Repository;
  * a database connection only for that one statement and keeps no state, so it
  * is safe at any level of parallel use.
  *
- * Only APPROVED shops, APPROVED products and rows with stock ever come back.
+ * Only shops that are APPROVED and open right now, APPROVED products, and
+ * rows with stock ever come back.
  */
 // ponytail: distance is a bounding-box index lookup plus the haversine formula
 // in SQL. Good for thousands of shops. Move to PostGIS (GiST index) when the
@@ -39,7 +41,7 @@ class BrowseQueries {
     record OfferRow(long productId, String name, String brand, String imageUrl, String category,
             long shopProductId, long shopId, int shopPriceCents, double km, int shops) {}
 
-    record ShopOfferRow(long shopProductId, long shopId, int shopPriceCents, double km) {}
+    record ShopOfferRow(long shopProductId, long shopId, int shopPriceCents, String category, double km) {}
 
     /** Kilometres from the customer to a shop's PUBLIC point (see Shop.publicLatitude). */
     private static final String KM = Geo.kmSql("s.public_latitude", "s.public_longitude", ":lat", ":lng");
@@ -59,10 +61,11 @@ class BrowseQueries {
                     where s.status = 'APPROVED'
                       and s.public_latitude between :minLat and :maxLat
                       and s.public_longitude between :minLng and :maxLng
+                      and %s
                 ) boxed
                 where km <= :maxKm
             )
-            """.formatted(KM);
+            """.formatted(KM, Shop.OPEN_NOW_SQL);
 
     /**
      * One row per product: the offer from the nearest shop that has it (ties go
@@ -92,7 +95,7 @@ class BrowseQueries {
             """;
 
     private static final String OFFERS = NEARBY + """
-            select sp.id as shop_product_id, sp.shop_id, sp.price_cents, n.km
+            select sp.id as shop_product_id, sp.shop_id, sp.price_cents, p.category, n.km
             from nearby n
             join shop_products sp on sp.shop_id = n.id and sp.product_id = :productId and sp.quantity > 0
             join catalog_products p on p.id = sp.product_id and p.status = 'APPROVED'
@@ -131,7 +134,7 @@ class BrowseQueries {
         return in(area, OFFERS)
                 .param("productId", productId)
                 .query((rs, row) -> new ShopOfferRow(rs.getLong("shop_product_id"), rs.getLong("shop_id"),
-                        rs.getInt("price_cents"), rs.getDouble("km")))
+                        rs.getInt("price_cents"), rs.getString("category"), rs.getDouble("km")))
                 .list();
     }
 

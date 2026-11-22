@@ -5,6 +5,7 @@ import com.quickcommerce.browse.BrowseQueries.OfferRow;
 import com.quickcommerce.common.Geo;
 import com.quickcommerce.common.Paging;
 import com.quickcommerce.order.Pricing;
+import com.quickcommerce.order.Pricing.Prices;
 import java.util.List;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.PageRequest;
@@ -71,12 +72,13 @@ public class BrowseController {
     /** "Change shop" for one product: every nearby shop that has it, nearest first. */
     @GetMapping("/products/{productId}/offers")
     List<Offer> offers(@PathVariable long productId, @RequestParam double lat, @RequestParam double lng) {
+        Prices prices = pricing.current();
         return queries.offers(area(lat, lng), productId).stream()
-                .map(row -> offer(row.shopProductId(), row.shopId(), row.shopPriceCents(), row.km()))
+                .map(row -> offer(prices, row.shopProductId(), row.shopId(), row.shopPriceCents(), row.category(), row.km()))
                 .toList();
     }
 
-    /** Browse and search inside one shop. 404 if the shop is not open to this customer (not approved, or too far). */
+    /** Browse and search inside one shop. 404 if this customer cannot order from it (not approved, too far, or closed now). */
     @GetMapping("/shops/{shopId}/products")
     ShopFeed shopProducts(@PathVariable long shopId, @RequestParam double lat, @RequestParam double lng,
             @RequestParam(defaultValue = "") String q, @RequestParam(defaultValue = "") String category,
@@ -95,21 +97,23 @@ public class BrowseController {
         if (category.length() > 80) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "category is too long");
         }
+        Prices prices = pricing.current();
         return queries.feed(area, pinnedShopId, likePattern(q), category.trim(), paging.getPageSize() + 1, paging.getOffset())
-                .stream().map(this::card).toList();
+                .stream().map(row -> card(prices, row)).toList();
     }
 
     private static List<ProductCard> trim(List<ProductCard> cards, PageRequest paging) {
         return cards.size() > paging.getPageSize() ? cards.subList(0, paging.getPageSize()) : cards;
     }
 
-    private ProductCard card(OfferRow row) {
+    private ProductCard card(Prices prices, OfferRow row) {
         return new ProductCard(row.productId(), row.name(), row.brand(), row.imageUrl(), row.category(),
-                offer(row.shopProductId(), row.shopId(), row.shopPriceCents(), row.km()), row.shops() - 1);
+                offer(prices, row.shopProductId(), row.shopId(), row.shopPriceCents(), row.category(), row.km()),
+                row.shops() - 1);
     }
 
-    private Offer offer(long shopProductId, long shopId, int shopPriceCents, double km) {
-        return new Offer(shopProductId, shopId, pricing.customerPrice(shopPriceCents), roundKm(km), eta(km));
+    private Offer offer(Prices prices, long shopProductId, long shopId, int shopPriceCents, String category, double km) {
+        return new Offer(shopProductId, shopId, prices.customerPrice(shopPriceCents, category), roundKm(km), eta(km));
     }
 
     // ponytail: a fixed prep time plus a fixed speed. Replace with real numbers

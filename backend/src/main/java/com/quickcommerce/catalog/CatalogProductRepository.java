@@ -1,5 +1,6 @@
 package com.quickcommerce.catalog;
 
+import java.util.List;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -21,6 +22,9 @@ public interface CatalogProductRepository extends JpaRepository<CatalogProduct, 
               and (lower(p.name) like :pattern or lower(coalesce(p.brand, '')) like :pattern or p.barcode = :q)
             """)
     Page<CatalogProduct> search(CatalogProduct.Status status, String pattern, String q, Pageable pageable);
+
+    @Query("select distinct p.category from CatalogProduct p where p.status = :status order by p.category")
+    List<String> categories(CatalogProduct.Status status);
 
     long countByRequestedByShopIdAndStatus(Long shopId, CatalogProduct.Status status);
 

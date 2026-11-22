@@ -41,9 +41,7 @@ abstract class ApiTestBase {
     static final String PASSWORD = "correct-horse-1";
     static final String VALID_SHOP = """
             {"name":"Corner Stop","phone":"+1 604 555 0100","addressLine":"12 Main St","city":"Surrey",
-             "province":"BC","postalCode":"v3t 1a1","latitude":49.19,"longitude":-122.85,
-             "hours":[{"dayOfWeek":"MONDAY","opens":"09:00","closes":"21:00"},
-                      {"dayOfWeek":"TUESDAY","opens":"09:00","closes":"21:00"}]}
+             "province":"BC","postalCode":"v3t 1a1","latitude":49.19,"longitude":-122.85}
             """;
 
     @Value("${local.server.port}")
@@ -199,6 +197,7 @@ abstract class ApiTestBase {
         String shop = shopOwner();
         long shopId = get("/api/shops/me", shop).id();
         assertEquals(200, put("/api/admin/shops/" + shopId + "/status", admin, "{\"status\":\"APPROVED\"}").status());
+        openAllWeek(admin, shopId);
         return new Stocked(shop, shopId, addStock(shop, admin, priceCents, quantity));
     }
 
@@ -248,7 +247,17 @@ abstract class ApiTestBase {
                 .replace("\"latitude\":49.19", "\"latitude\":" + lat).replace("\"longitude\":-122.85", "\"longitude\":" + lng));
         assertEquals(200, res.status(), res.body());
         assertEquals(200, put("/api/admin/shops/" + res.id() + "/status", admin, "{\"status\":\"APPROVED\"}").status());
+        openAllWeek(admin, res.id());
         return new Stocked(shop, res.id(), 0);
+    }
+
+    /** Every day 00:00 to 23:59:59, so the shop is open whenever a test runs. */
+    static final String ALL_WEEK = "{\"hours\":[" + String.join(",", java.util.Arrays.stream(java.time.DayOfWeek.values())
+            .map(d -> "{\"dayOfWeek\":\"" + d + "\",\"opens\":\"00:00\",\"closes\":\"23:59:59\"}").toList()) + "]}";
+
+    void openAllWeek(String admin, long shopId) {
+        Res res = put("/api/admin/shops/" + shopId + "/hours", admin, ALL_WEEK);
+        assertEquals(200, res.status(), res.body());
     }
 
     /** A new approved catalog product with this exact name; returns its id. */

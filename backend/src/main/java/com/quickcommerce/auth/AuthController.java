@@ -114,6 +114,10 @@ public class AuthController {
                 // Same answer for "no such email" and "wrong password".
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Wrong email or password"));
         throttle.reset("login:" + email);
+        // Checked only after the password, so it tells nothing to someone guessing passwords.
+        if (user.isDisabled()) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This account is suspended");
+        }
         return respond(user);
     }
 

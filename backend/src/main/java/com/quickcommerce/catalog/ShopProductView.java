@@ -7,5 +7,6 @@ public record ShopProductView(
         String name,
         String brand,
         String imageUrl,
+        String category,
         int priceCents,
         int quantity) {}

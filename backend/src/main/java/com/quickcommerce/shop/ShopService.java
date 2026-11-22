@@ -37,6 +37,11 @@ public class ShopService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Shop not found"));
     }
 
+    /** True when the shop's opening hours cover this moment, in the shop's time zone. */
+    public boolean isOpenNow(Long shopId) {
+        return shops.isOpenNow(shopId);
+    }
+
     /** The shop as stored, real location included. For the driver assigned to collect from it. */
     public Shop require(Long shopId) {
         return shops.findById(shopId)

@@ -22,7 +22,7 @@ public interface ShopProductRepository extends JpaRepository<ShopProduct, Long> 
 
     String VIEW = """
             select new com.quickcommerce.catalog.ShopProductView(
-                sp.id, p.id, p.name, p.brand, p.imageUrl, sp.priceCents, sp.quantity)
+                sp.id, p.id, p.name, p.brand, p.imageUrl, p.category, sp.priceCents, sp.quantity)
             from ShopProduct sp join CatalogProduct p on p.id = sp.productId
             where sp.shopId = :shopId
             """;

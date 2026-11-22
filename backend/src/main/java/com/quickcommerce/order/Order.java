@@ -47,6 +47,8 @@ public class Order {
     private double longitude;
     private String note;
     private int deliveryFeeCents;
+    /** What the driver earns for this delivery, frozen when the order is placed. */
+    private int driverPayCents;
     @Column(updatable = false)
     private Instant createdAt;
 
@@ -57,4 +59,7 @@ public class Order {
     private String deliveryCode;
     @Column(updatable = false)
     private Instant deliveredAt;
+    /** Why admin cancelled the order. Null when the customer cancelled, or the order was not cancelled. */
+    @Column(updatable = false)
+    private String cancelReason;
 }

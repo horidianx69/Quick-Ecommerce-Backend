@@ -65,6 +65,11 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-security-oauth2-resource-server</artifactId>
 		</dependency>
+		<!-- /actuator/health: for the host's health check and load balancer. Nothing else is exposed. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
 		<!-- Publishes /v3/api-docs (the contract for the frontend) and /swagger-ui.html -->
 		<dependency>
 			<groupId>org.springdoc</groupId>

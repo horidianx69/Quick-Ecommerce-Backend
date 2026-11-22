@@ -25,7 +25,7 @@ In smaller Canadian towns, many people run their own private shops. They buy sto
 - **Drivers** pick up the order from the shop and deliver it.
 - **Admin** (us) approves shops and drivers, and owns the shared product list.
 
-The platform adds its markup on top of the shop's price (1.5x by default). The shop is paid its own price.
+The platform adds its markup on top of the shop's price (1.5x by default, set by admin per category). The shop is paid its own price.
 
 **Privacy rule that shapes everything:** a shop's real location is private. Customers only ever see a distance and a delivery time, never the shop's address or exact position.
 
@@ -36,15 +36,18 @@ The platform adds its markup on top of the shop's price (1.5x by default). The s
 | Part | Status | What it does |
 |---|---|---|
 | Auth | Done | Sign up, log in, roles (shop, customer, driver, admin), login limits |
-| Shop | Done | Shop profile, location, opening hours, admin approval |
+| Shop | Done | Shop profile and location, admin approval |
 | Catalog | Done | Shared product list, shop requests for new products, admin review |
 | Shop products and stock | Done | Each shop's price and stock count for catalog products |
 | Orders | Done | Place, accept, reject, mark ready, cancel, auto-expire |
 | Browsing | Done | Product-first feed, change shop, search inside one shop |
 | Drivers and delivery | Done | Driver approval, online status, location pings, job list, pickup, delivery code |
 | Customer tracking | Done | Driver's live position on the map, after pickup only |
+| Admin | Done | Dashboard, order board, cancel, assign drivers by hand, prices and fees, opening hours, suspend accounts |
+| Health check | Done | `/actuator/health` for the host and load balancer |
 | Payments | Not yet | Orders are free to place for now |
 | Sales tax | Not yet | Waiting on the launch province |
+| Password reset | Not yet | Needs an email provider |
 
 The frontends (shop website, admin, customer app, driver app) are separate and not in this repository. They call the endpoints below.
 
@@ -74,10 +77,11 @@ backend/
     order/      placing orders and every order status change
     browse/     the customer's product feed and search
     dispatch/   drivers, job list, delivery steps, tracking
+    admin/      the admin dashboard summary
     common/     security setup, error format, paging, geo helpers
   src/main/resources/
     application.properties      settings (see Configuration)
-    db/migration/V1..V4.sql     database tables, applied by Flyway at startup
+    db/migration/V1..V5.sql     database tables, applied by Flyway at startup
   src/test/java/com/quickcommerce/
     *Test.java                  tests, run against a real Postgres
     DevApplication.java         starts the app locally with a throwaway database
@@ -100,7 +104,7 @@ Every user has one role. The login token carries it, and each group of endpoints
 | `DRIVER` | Sign up with `"role": "DRIVER"` | `/api/drivers/me/**` |
 | `ADMIN` | Created at startup from `ADMIN_EMAIL` and `ADMIN_PASSWORD` | `/api/admin/**` |
 
-Nobody can sign up as admin. A new shop or driver can do nothing useful until admin approves them.
+Nobody can sign up as admin. A new shop or driver can do nothing useful until admin approves them. Admin can also suspend any non-admin account: it cannot log in, and tokens it already holds stop working at once.
 
 ### The life of an order
 
@@ -108,7 +112,7 @@ Nobody can sign up as admin. A new shop or driver can do nothing useful until ad
 PLACED ──► ACCEPTED ──► READY ──► PICKED_UP ──► DELIVERED
    │
    ├──► REJECTED   (shop said no)
-   ├──► CANCELLED  (customer cancelled before the shop answered)
+   ├──► CANCELLED  (customer cancelled before the shop answered, or admin cancelled any time before delivery)
    └──► EXPIRED    (shop did not answer within 10 minutes)
 ```
 
@@ -120,18 +124,30 @@ PLACED ──► ACCEPTED ──► READY ──► PICKED_UP ──► DELIVERE
 
 Each step works only from the step before. Steps cannot be skipped or done twice.
 
+Admin can step in at any point before delivery: cancel the order with a reason (stock goes back unless it was already picked up), or give it to a driver by hand.
+
+### Prices, fees and opening hours
+
+Admin sets these in the app; nothing needs a redeploy.
+
+- **Markup:** a default (150 = 1.5x), plus an optional different markup per catalog category. Never below 100, so the customer never pays less than the shop's price.
+- **Delivery fee** the customer pays, and **driver pay** per delivery.
+- **Opening hours** for each shop: one time window per day, in the shop's local time zone (taken from its province). A shop is only shown to customers, and can only take orders, while it is open. A shop with no hours is closed.
+
+A placed order keeps its prices, fee and driver pay forever, so a later settings change never changes a past order.
+
 ### Who sees what
 
-| | Customer | Shop | Driver |
-|---|---|---|---|
-| Shop name | After ordering | Own shop | After accepting the job |
-| Shop address and exact location | Never | Own shop | After accepting the job |
-| Distance to the shop | Yes (from a shifted point) | — | Yes |
-| Customer name and address | Own | Never | After pickup |
-| Which products are in the order | Yes | Yes | Never, only how many units |
-| Prices | Customer price | Shop price and payout | Delivery pay only |
-| Driver's live position | After pickup only | Never | Own |
-| Delivery code | Yes | Never | Never (the customer reads it out) |
+| | Customer | Shop | Driver | Admin |
+|---|---|---|---|---|
+| Shop name | After ordering | Own shop | After accepting the job | Yes |
+| Shop address and exact location | Never | Own shop | After accepting the job | Yes |
+| Distance to the shop | Yes (from a shifted point) | — | Yes | — |
+| Customer name and address | Own | Never | After pickup | Yes |
+| Which products are in the order | Yes | Yes | Never, only how many units | Yes |
+| Prices | Customer price | Shop price and payout | Delivery pay only | All of them |
+| Driver's live position | After pickup only | Never | Own | — |
+| Delivery code | Yes | Never | Never (the customer reads it out) | Never |
 
 **Why distances use a shifted point:** with exact distances, three lookups from different places would reveal where a shop is. So every distance a customer sees is measured from a point 150 to 400 m away from the real one, chosen once per shop.
 
@@ -198,7 +214,7 @@ POST /api/auth/signup
 | Method | Path | What it does |
 |---|---|---|
 | `GET` | `/api/shops/me` | My shop. `404` until it is created. |
-| `PUT` | `/api/shops/me` | Create or update my shop. New shops start as `PENDING`. |
+| `PUT` | `/api/shops/me` | Create or update my shop. New shops start as `PENDING`. Opening hours are set by admin. |
 | `GET` | `/api/shops/me/products` | My products with price and stock. |
 | `POST` | `/api/shops/me/products` | Add a catalog product with my price and starting stock. |
 | `PUT` | `/api/shops/me/products/{id}` | Change my price. |
@@ -215,8 +231,7 @@ POST /api/auth/signup
 PUT /api/shops/me
 { "name": "Corner Stop", "phone": "+1 604 555 0100",
   "addressLine": "12 Main St", "city": "Surrey", "province": "BC", "postalCode": "V3T 1A1",
-  "latitude": 49.19, "longitude": -122.85,
-  "hours": [ { "dayOfWeek": "MONDAY", "opens": "09:00", "closes": "21:00" } ] }
+  "latitude": 49.19, "longitude": -122.85 }
 
 POST /api/shops/me/products              { "productId": 1, "priceCents": 1200, "quantity": 10 }
 PUT  /api/shops/me/products/1            { "priceCents": 1299 }
@@ -227,16 +242,30 @@ POST /api/shops/me/orders/7/accept       { "unavailableItemIds": [12] }
 
 - `province` is a two-letter code (`BC`, `ON`, ...). `postalCode` is a Canadian code like `V3T 1A1`.
 - `latitude` and `longitude` come from the map pin in the shop's sign-up form.
-- `hours`: one entry per open day. A day with no entry means closed.
-- A shop never sees the customer's name, address or the customer price. Its order view shows its own prices and `payoutCents`.
+- The shop's `timeZone` is set from its province, and `hours` (read-only here) are what admin set.
+- A shop never sees the customer's name, address or the customer price. Its order view shows its own prices, `payoutCents`, and `cancelReason` if admin cancelled.
 - Orders the shop doesn't answer within 10 minutes expire, and their stock comes back.
 
 ### Admin (role `ADMIN`)
 
 | Method | Path | What it does |
 |---|---|---|
+| `GET` | `/api/admin/stats` | Dashboard: orders waiting for a shop, needing a driver, on the road, placed and delivered in 24 h; shops, drivers and product requests pending; drivers online. |
 | `GET` | `/api/admin/shops?status=PENDING` | Shops waiting for approval (or any status, or all). |
+| `GET` | `/api/admin/shops/{id}` | One shop, with its real location and hours. |
 | `PUT` | `/api/admin/shops/{id}/status` | `APPROVED`, `SUSPENDED` or `PENDING`. |
+| `PUT` | `/api/admin/shops/{id}/hours` | Replace the shop's opening hours for the whole week. |
+| `GET` | `/api/admin/orders` | Every order, newest first. Filters: `status`, `shopId`, `customerId`, `driverId`, `needsDriver=true`. |
+| `GET` | `/api/admin/orders/{id}` | One order with everything: both prices, payout, driver pay, all three parties. |
+| `POST` | `/api/admin/orders/{id}/cancel` | Cancel any unfinished order, with a reason. |
+| `POST` | `/api/admin/orders/{orderId}/assign` | Give an order waiting for pickup to an approved driver (replaces any driver it had). |
+| `POST` | `/api/admin/orders/{orderId}/unassign` | Take it off its driver before pickup; it goes back to the job list. |
+| `GET` | `/api/admin/settings` | Default markup, delivery fee, driver pay, and per-category markups. |
+| `PUT` | `/api/admin/settings` | Change the default markup, delivery fee and driver pay. |
+| `PUT` | `/api/admin/settings/markups/{category}` | Set a markup for one category. |
+| `DELETE` | `/api/admin/settings/markups/{category}` | That category goes back to the default markup. |
+| `GET` | `/api/admin/users?role=&q=` | Accounts, searched by email or name. |
+| `PUT` | `/api/admin/users/{id}/disabled` | Suspend (`true`) or restore (`false`) an account. Not for admins. |
 | `GET` | `/api/admin/catalog?status=PENDING&q=` | Catalog by status. `PENDING` is the shops' product requests. |
 | `POST` | `/api/admin/catalog` | Add a catalog product. |
 | `PUT` | `/api/admin/catalog/{id}` | Edit a product. Approve or reject a request by changing `status`. |
@@ -249,17 +278,31 @@ POST /api/admin/catalog              { "name": "Maple Syrup 1L", "brand": "Kirkl
                                        "category": "Pantry", "taxCategory": "ZERO_RATED", "status": "APPROVED" }
 ```
 
-`taxCategory` is `ZERO_RATED` (basic groceries) or `TAXABLE`. Catalog `status` is `PENDING`, `APPROVED` or `REJECTED`.
+```json
+PUT  /api/admin/shops/1/hours        { "hours": [ { "dayOfWeek": "MONDAY", "opens": "08:00", "closes": "22:00" },
+                                                  { "dayOfWeek": "SATURDAY", "opens": "00:00", "closes": "23:59:59" } ] }
+PUT  /api/admin/settings             { "defaultMarkupPercent": 150, "deliveryFeeCents": 499, "driverPayCents": 499 }
+PUT  /api/admin/settings/markups/Dairy   { "markupPercent": 130 }
+POST /api/admin/orders/7/cancel      { "reason": "Customer asked by phone" }
+POST /api/admin/orders/7/assign      { "driverId": 12 }
+PUT  /api/admin/users/9/disabled     { "disabled": true }
+```
+
+- `taxCategory` is `ZERO_RATED` (basic groceries) or `TAXABLE`. Catalog `status` is `PENDING`, `APPROVED` or `REJECTED`.
+- Hours: days left out are closed. A window cannot run past midnight; for all day use `00:00` to `23:59:59`.
+- Markups are percents from 100 to 1000. Category names must match the catalog exactly (see `GET /api/catalog/categories`).
+- Cancelling before pickup puts the stock back. After pickup it does not, because the goods have left the shop.
 
 ### Catalog search (any logged-in user)
 
 | Method | Path | What it does |
 |---|---|---|
 | `GET` | `/api/catalog?q=maple` | Approved catalog products by name, brand or exact barcode. Shops use this to find products to add. |
+| `GET` | `/api/catalog/categories` | Every category with an approved product, A to Z. For category tabs. |
 
 ### Browsing (role `CUSTOMER`)
 
-Every browse call takes the customer's delivery point as `lat` and `lng`. Only approved shops within 10 km, approved products, and items in stock are shown.
+Every browse call takes the customer's delivery point as `lat` and `lng`. Only approved shops that are open right now and within 10 km, approved products, and items in stock are shown.
 
 | Method | Path | What it does |
 |---|---|---|
@@ -306,7 +349,9 @@ POST /api/orders
 - `idempotencyKey`: make a new random UUID per checkout attempt, and send the same one again if you retry that attempt.
 - If a line is out of stock the whole order fails with `409`, and the error's `shopProductId` says which line.
 - A customer can have at most 3 orders waiting for a shop's answer.
-- Totals: `subtotalCents` + `deliveryFeeCents` ($4.99) = `totalCents`. Items the shop marked unavailable are not counted.
+- `409` "This shop is closed right now" if the shop closed since the customer browsed.
+- If admin cancels, the order shows `status: CANCELLED` with a `cancelReason`.
+- Totals: `subtotalCents` + `deliveryFeeCents` = `totalCents`. Items the shop marked unavailable are not counted.
 
 Tracking, while the order is on the way:
 
@@ -334,6 +379,8 @@ GET /api/orders/7/tracking
 | `POST` | `/api/drivers/me/delivery/picked-up` | Collected from the shop (after the shop marks it ready). |
 | `POST` | `/api/drivers/me/delivery/delivered` | Delivered, with the customer's code. |
 | `GET` | `/api/drivers/me/deliveries` | My finished deliveries and pay. |
+
+`payCents` everywhere is the driver pay admin set when the order was placed.
 
 ```json
 PUT  /api/drivers/me                     { "phone": "+1 604 555 0142" }
@@ -408,6 +455,10 @@ curl -s -X PUT localhost:8080/api/admin/shops/1/status -H "Authorization: Bearer
 curl -s localhost:8080/api/shops/me/products -H "Authorization: Bearer $SHOP"
 ```
 
+### Health check
+
+`GET /actuator/health` answers `{"status":"UP"}` without a login when the app and its database are working. Point your host's health check and load balancer at it. No other actuator endpoint is exposed.
+
 ### Run against a real Postgres
 
 For a shared server or production, use a real Postgres 17 database. Flyway creates and updates the tables when the app starts.
@@ -447,18 +498,18 @@ Set these as environment variables. Everything else lives in [`application.prope
 | `FORWARD_HEADERS_STRATEGY` | `none` | Set to `native` behind a proxy |
 | `AUTH_IP_LIMIT_PER_MINUTE` | `60` | Signups and logins per IP per minute |
 | `DB_POOL_SIZE` | `10` | Database connections |
-| `ORDER_MARKUP_PERCENT` | `150` | Customer price = shop price × this ÷ 100 |
-| `ORDER_DELIVERY_FEE_CENTS` | `499` | Flat delivery fee |
 | `DRIVER_MAX_PINGS_PER_MINUTE` | `60` | Location pings per driver per minute |
 | `API_DOCS_ENABLED` | `true` | Set to `false` to hide Swagger UI in production |
 
 Fixed in `application.properties`: delivery range 10 km, shop answer time 10 minutes, driver job radius 8 km, ETA of 10 minutes prep + 3 minutes per km, tokens valid 12 hours.
 
+Markup, delivery fee, driver pay and opening hours are not configuration: admin sets them through the API, and they live in the database (the first values are 1.5x, $4.99 and $4.99).
+
 ---
 
 ## Tests
 
-`mvn test` runs 71 tests against a real Postgres, over real HTTP, the same way the apps call the API.
+`mvn test` runs 87 tests against a real Postgres, over real HTTP, the same way the apps call the API.
 
 | Test | What it checks |
 |---|---|
@@ -466,20 +517,20 @@ Fixed in `application.properties`: delivery range 10 km, shop answer time 10 min
 | `OrderTest` | Placing, pricing, every order step, who can see what |
 | `BrowseTest` | Feed, change shop, search in a shop, shop location privacy |
 | `DriverTest` | Driver approval, job list, pickup, delivery code, tracking |
+| `AdminTest` | Prices and fees, opening hours, order board, cancel, assigning drivers, suspending accounts, dashboard, health check |
 | `SecurityTest` | Forged tokens, SQL injection, oversized bodies, error leaks |
-| `ConcurrencyTest`, `OrderConcurrencyTest`, `DriverConcurrencyTest` | Many requests at the same moment: stock never oversold, one winner per race, no deadlocks |
+| `ConcurrencyTest`, `OrderConcurrencyTest`, `DriverConcurrencyTest`, `AdminConcurrencyTest` | Many requests at the same moment: stock never oversold, one winner per race, no deadlocks, admin actions racing shops and drivers |
 | `IpThrottleTest`, `PingThrottleTest`, `auth/ThrottleTest` | Rate limits |
 
 ---
 
 ## Not built yet
 
-- **Payments.** Orders cost nothing to place. The places where the card will be held, charged and refunded are marked in `OrderService`.
-- **Sales tax.** Depends on the launch province.
+- **Payments.** Orders cost nothing to place. The places where the card will be held, charged and refunded are marked in `OrderService`. Needs a Stripe account.
+- **Sales tax.** Depends on the launch province. Each product already has a tax category.
+- **Password reset.** Needs an email provider.
+- **Push notifications.** Shops, drivers and customers poll for updates.
+- **Image upload.** Products have an `imageUrl` text field only.
 - **Multi-shop carts.** One order goes to one shop for now.
 - **Phone login for customers.** Customers use email and password.
-- **Opening hours in ordering.** Hours are stored but orders are accepted at any time.
-- **Push notifications.** Shops, drivers and customers poll for updates.
-- **Admin tools** for assigning a driver by hand, refunds, and changing markup per category.
-- **Image upload.** Products have an `imageUrl` text field only.
-- **Real driver pay rule.** A driver is paid the order's delivery fee in full, as a placeholder.
+- **Refresh tokens.** Logins last 12 hours.

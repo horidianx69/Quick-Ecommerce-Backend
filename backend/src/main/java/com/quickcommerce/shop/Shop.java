@@ -21,6 +21,8 @@ import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
 import lombok.AccessLevel;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -32,7 +34,10 @@ public class Shop {
 
     public enum Status { PENDING, APPROVED, SUSPENDED }
 
-    /** One row per open day. A day with no row means the shop is closed that day. */
+    /**
+     * One row per open day. A day with no row means the shop is closed that day.
+     * Set by admin only. For all day, use opens 00:00 and closes 23:59:59.
+     */
     @Embeddable
     public record Hours(
             @NotNull @Enumerated(EnumType.STRING) @Column(name = "day_of_week") DayOfWeek dayOfWeek,
@@ -40,6 +45,21 @@ public class Shop {
             @NotNull LocalTime closes) {}
 
     private static final SecureRandom RANDOM = new SecureRandom();
+
+    /**
+     * SQL that is true when shop "s" is open right now: today, in the shop's own
+     * time zone, has an hours row and the local time falls inside it. Browsing
+     * and ordering both use this one rule. A shop with no hours is always closed.
+     *
+     * ponytail: one window per day, and it cannot run past midnight. Allow split
+     * or overnight hours when a shop needs them.
+     */
+    public static final String OPEN_NOW_SQL = """
+            exists (select 1 from shop_hours h
+                    where h.shop_id = s.id
+                      and h.day_of_week = to_char(now() at time zone s.time_zone, 'FMDAY')
+                      and (now() at time zone s.time_zone)::time >= h.opens
+                      and (now() at time zone s.time_zone)::time < h.closes)""";
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -51,6 +71,8 @@ public class Shop {
     private String city;
     private String province;
     private String postalCode;
+    /** Set from the province. Opening hours are local times in this zone. */
+    private String timeZone;
 
     /** The real location. For the owner, admin and (later) the assigned driver only. Set through moveTo. */
     @Setter(AccessLevel.NONE)
@@ -84,6 +106,16 @@ public class Shop {
     @ElementCollection(fetch = FetchType.EAGER)
     @CollectionTable(name = "shop_hours", joinColumns = @JoinColumn(name = "shop_id"))
     private List<Hours> hours = new ArrayList<>();
+
+    /** Throws 400 unless every day appears at most once and each day closes after it opens. */
+    public static void validateHours(List<Hours> hours) {
+        if (hours.stream().map(Hours::dayOfWeek).distinct().count() != hours.size()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Each day can appear once in hours");
+        }
+        if (hours.stream().anyMatch(h -> !h.closes().isAfter(h.opens()))) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "closes must be after opens");
+        }
+    }
 
     /** Sets the real location, and picks a new public one only when the real one actually changed. */
     public void moveTo(double newLatitude, double newLongitude) {
