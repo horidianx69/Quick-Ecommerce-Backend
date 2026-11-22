@@ -50,7 +50,7 @@ class BrowseTest extends ApiTestBase {
         assertEquals("Milk " + tag, feed.read("$.content[0].name"));
         assertEquals((int) near.shopId(), feed.<Integer>read("$.content[0].offer.shopId"), "the nearest shop wins");
         assertEquals((int) nearRow, feed.<Integer>read("$.content[0].offer.shopProductId"));
-        assertEquals(1500, feed.<Integer>read("$.content[0].offer.priceCents"), "customer price = shop price 1000 x 1.5");
+        assertEquals(1499, feed.<Integer>read("$.content[0].offer.priceCents"), "customer price: 10.00 x 1.5, down to 14.99");
         assertEquals(1, feed.<Integer>read("$.content[0].otherShops"), "the mid shop also has it; the far shop is out of range");
         assertFalse(feed.<Boolean>read("$.hasMore"));
 
@@ -82,13 +82,13 @@ class BrowseTest extends ApiTestBase {
         assertEquals(200, offers.status(), offers.body());
         assertEquals(List.of((int) near.shopId(), (int) mid.shopId()), offers.<List<Integer>>read("$[*].shopId"),
                 "nearest first, and the out-of-range shop is not offered");
-        assertEquals(List.of(1500, 1200), offers.<List<Integer>>read("$[*].priceCents"));
+        assertEquals(List.of(1499, 1199), offers.<List<Integer>>read("$[*].priceCents"));
         double midKm = offers.<Number>read("$[1].distanceKm").doubleValue();
         assertTrue(midKm >= 3.9 && midKm <= 4.9, "about 4.4 km, got " + midKm);
 
         // The price shown is the price charged: order from the second shop and compare.
         Res placed = order(customer, mid.shopId(), item(midRow, 1));
-        assertEquals(1200, placed.<Integer>read("$.items[0].unitPriceCents"));
+        assertEquals(1199, placed.<Integer>read("$.items[0].unitPriceCents"));
 
         assertEquals(List.of(), get("/api/browse/products/999999999/offers?" + HERE, customer).<List<?>>read("$"));
     }

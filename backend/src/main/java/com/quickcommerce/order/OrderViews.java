@@ -14,6 +14,12 @@ public final class OrderViews {
 
     public record Line(Long id, Long productId, String name, int quantity, int unitPriceCents, boolean unavailable) {}
 
+    /**
+     * totalCents = subtotalCents + every fee + tipCents. Fees are frozen when the
+     * order is placed; items the shop could not supply are left out of the subtotal.
+     * receiptStatus: null, or ASKED when the app should ask "Did you receive your order?",
+     * then RECEIVED or NOT_RECEIVED once answered.
+     */
     public record CustomerOrderView(
             Long id,
             Long shopId,
@@ -22,16 +28,23 @@ public final class OrderViews {
             List<Line> items,
             int subtotalCents,
             int deliveryFeeCents,
+            int handlingFeeCents,
+            int smallCartFeeCents,
+            int lateNightFeeCents,
+            int surgeFeeCents,
+            int tipCents,
             int totalCents,
             DeliveryAddress address,
             String note,
             Instant createdAt,
+            Instant deliveredAt,
             boolean driverAssigned,
             String driverName,
             String deliveryCode,
-            String cancelReason) {}
+            String cancelReason,
+            String receiptStatus) {}
 
-    /** payoutCents = what the shop earns for the items it can supply. */
+    /** payoutCents = what the shop earns for the items it can supply. unitPriceCents is the shop's payout per unit. */
     public record ShopOrderView(
             Long id,
             Order.Status status,
@@ -49,7 +62,11 @@ public final class OrderViews {
     public record AdminLine(Long id, Long productId, String name, int quantity, int shopPriceCents,
             int customerPriceCents, boolean unavailable) {}
 
-    /** Everything about an order, for admin only. driver is null until one is assigned. */
+    /**
+     * Everything about an order, for admin only. driver is null until one is assigned.
+     * itemMarginCents = subtotal - shop payout. driverPayCents = engaged-time pay so far.
+     * platformNetCents = item margin + all fees - driver pay (tips go to the driver and are left out).
+     */
     public record AdminOrderView(
             Long id,
             Order.Status status,
@@ -61,50 +78,70 @@ public final class OrderViews {
             List<AdminLine> items,
             int subtotalCents,
             int deliveryFeeCents,
+            int handlingFeeCents,
+            int smallCartFeeCents,
+            int lateNightFeeCents,
+            int surgeFeeCents,
+            int tipCents,
             int totalCents,
             int shopPayoutCents,
+            int itemMarginCents,
             int driverPayCents,
+            int platformNetCents,
             DeliveryAddress address,
             String note,
-            String cancelReason) {}
+            String cancelReason,
+            String receiptStatus) {}
 
     private OrderViews() {}
 
     // ponytail: no sales tax in the totals yet. Rates and which items are taxed
     // depend on the launch province, which is still undecided.
     static CustomerOrderView customer(Order o, String shopName, List<OrderItem> items, String driverName) {
-        int subtotal = items.stream().filter(i -> !i.isUnavailable())
-                .mapToInt(i -> i.getQuantity() * i.getCustomerPriceCents()).sum();
+        int subtotal = subtotal(items);
         return new CustomerOrderView(o.getId(), o.getShopId(), shopName, o.getStatus(),
                 items.stream().map(i -> line(i, i.getCustomerPriceCents())).toList(),
-                subtotal, o.getDeliveryFeeCents(), subtotal + o.getDeliveryFeeCents(),
-                new DeliveryAddress(o.getAddressLine(), o.getCity(), o.getProvince(), o.getPostalCode(),
-                        o.getLatitude(), o.getLongitude()),
-                o.getNote(), o.getCreatedAt(), o.getDriverId() != null, driverName, o.getDeliveryCode(), o.getCancelReason());
+                subtotal, o.getDeliveryFeeCents(), o.getHandlingFeeCents(), o.getSmallCartFeeCents(),
+                o.getLateNightFeeCents(), o.getSurgeFeeCents(), o.getTipCents(),
+                subtotal + o.feesCents() + o.getTipCents(),
+                address(o), o.getNote(), o.getCreatedAt(), o.getDeliveredAt(), o.getDriverId() != null, driverName,
+                o.getDeliveryCode(), o.getCancelReason(), o.getReceiptStatus());
     }
 
     static ShopOrderView shop(Order o, List<OrderItem> items) {
-        int payout = items.stream().filter(i -> !i.isUnavailable())
-                .mapToInt(i -> i.getQuantity() * i.getShopPriceCents()).sum();
         return new ShopOrderView(o.getId(), o.getStatus(),
                 items.stream().map(i -> line(i, i.getShopPriceCents())).toList(),
-                payout, o.getNote(), o.getCreatedAt(), o.getDriverId() != null, o.getCancelReason());
+                payout(items), o.getNote(), o.getCreatedAt(), o.getDriverId() != null, o.getCancelReason());
     }
 
-    static AdminOrderView admin(Order o, String shopName, Map<Long, String> userNames, List<OrderItem> items) {
-        List<OrderItem> supplied = items.stream().filter(i -> !i.isUnavailable()).toList();
-        int subtotal = supplied.stream().mapToInt(i -> i.getQuantity() * i.getCustomerPriceCents()).sum();
-        int payout = supplied.stream().mapToInt(i -> i.getQuantity() * i.getShopPriceCents()).sum();
+    static AdminOrderView admin(Order o, String shopName, Map<Long, String> userNames, List<OrderItem> items,
+            int driverPayCents) {
+        int subtotal = subtotal(items);
+        int payout = payout(items);
         return new AdminOrderView(o.getId(), o.getStatus(), o.getCreatedAt(), o.getDeliveredAt(),
                 new Party(o.getShopId(), shopName),
                 new Party(o.getCustomerId(), userNames.get(o.getCustomerId())),
                 o.getDriverId() == null ? null : new Party(o.getDriverId(), userNames.get(o.getDriverId())),
                 items.stream().map(i -> new AdminLine(i.getId(), i.getProductId(), i.getName(), i.getQuantity(),
                         i.getShopPriceCents(), i.getCustomerPriceCents(), i.isUnavailable())).toList(),
-                subtotal, o.getDeliveryFeeCents(), subtotal + o.getDeliveryFeeCents(), payout, o.getDriverPayCents(),
-                new DeliveryAddress(o.getAddressLine(), o.getCity(), o.getProvince(), o.getPostalCode(),
-                        o.getLatitude(), o.getLongitude()),
-                o.getNote(), o.getCancelReason());
+                subtotal, o.getDeliveryFeeCents(), o.getHandlingFeeCents(), o.getSmallCartFeeCents(),
+                o.getLateNightFeeCents(), o.getSurgeFeeCents(), o.getTipCents(),
+                subtotal + o.feesCents() + o.getTipCents(),
+                payout, subtotal - payout, driverPayCents, subtotal - payout + o.feesCents() - driverPayCents,
+                address(o), o.getNote(), o.getCancelReason(), o.getReceiptStatus());
+    }
+
+    private static int subtotal(List<OrderItem> items) {
+        return items.stream().filter(i -> !i.isUnavailable()).mapToInt(i -> i.getQuantity() * i.getCustomerPriceCents()).sum();
+    }
+
+    private static int payout(List<OrderItem> items) {
+        return items.stream().filter(i -> !i.isUnavailable()).mapToInt(i -> i.getQuantity() * i.getShopPriceCents()).sum();
+    }
+
+    private static DeliveryAddress address(Order o) {
+        return new DeliveryAddress(o.getAddressLine(), o.getCity(), o.getProvince(), o.getPostalCode(),
+                o.getLatitude(), o.getLongitude());
     }
 
     private static Line line(OrderItem i, int unitPriceCents) {

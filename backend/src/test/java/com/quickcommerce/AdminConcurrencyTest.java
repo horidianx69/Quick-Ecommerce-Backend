@@ -88,16 +88,16 @@ class AdminConcurrencyTest extends ApiTestBase {
             List<Res> results = parallel(30, i -> i < 20
                     ? post("/api/orders", customers.get(i), orderJsonWith(s.shopId(), UUID.randomUUID().toString(), doorNear(s),
                             item(s.rowId(), 1)))
-                    : put("/api/admin/settings", s.admin(), "{\"defaultMarkupPercent\":" + (i % 2 == 0 ? 200 : 150)
-                            + ",\"deliveryFeeCents\":499,\"driverPayCents\":499}"));
+                    : put("/api/admin/settings", s.admin(), "{\"defaultMarkupPercent\":" + (i % 2 == 0 ? 200 : 150) + "}"));
             for (Res placed : results.subList(0, 20)) {
                 assertEquals(201, placed.status(), placed.body());
                 int price = placed.<Integer>read("$.items[0].unitPriceCents");
-                assertTrue(price == 1500 || price == 2000, "each order uses one whole setting, got " + price);
-                assertEquals(price + 499, placed.<Integer>read("$.totalCents"));
+                assertTrue(price == 1499 || price == 1999, "each order uses one whole setting, got " + price);
+                int smallCart = price < 1500 ? 299 : 0;
+                assertEquals(price + 599 + 199 + smallCart, placed.<Integer>read("$.totalCents"));
             }
         } finally {
-            put("/api/admin/settings", s.admin(), "{\"defaultMarkupPercent\":150,\"deliveryFeeCents\":499,\"driverPayCents\":499}");
+            put("/api/admin/settings", s.admin(), "{\"defaultMarkupPercent\":150}");
         }
     }
 }

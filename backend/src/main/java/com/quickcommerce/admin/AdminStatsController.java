@@ -13,7 +13,7 @@ public class AdminStatsController {
 
     /** The first five are orders. needsDriver = accepted or ready with no driver: the number to watch. */
     public record Stats(long waitingForShop, long needsDriver, long onTheRoad, long placedLast24h, long deliveredLast24h,
-            long shopsPending, long driversPending, long driversOnline, long productRequestsPending) {}
+            long shopsPending, long driversPending, long driversOnline, long productRequestsPending, long driverAlertsOpen) {}
 
     private static final String SQL = """
             select
@@ -25,7 +25,8 @@ public class AdminStatsController {
               (select count(*) from shops where status = 'PENDING'),
               (select count(*) from drivers where status = 'PENDING'),
               (select count(*) from drivers where online),
-              (select count(*) from catalog_products where status = 'PENDING')
+              (select count(*) from catalog_products where status = 'PENDING'),
+              (select count(*) from driver_alerts where resolved_at is null)
             """;
 
     private final JdbcClient jdbc;
@@ -37,6 +38,6 @@ public class AdminStatsController {
     @GetMapping("/api/admin/stats")
     Stats stats() {
         return jdbc.sql(SQL).query((rs, row) -> new Stats(rs.getLong(1), rs.getLong(2), rs.getLong(3), rs.getLong(4),
-                rs.getLong(5), rs.getLong(6), rs.getLong(7), rs.getLong(8), rs.getLong(9))).single();
+                rs.getLong(5), rs.getLong(6), rs.getLong(7), rs.getLong(8), rs.getLong(9), rs.getLong(10))).single();
     }
 }

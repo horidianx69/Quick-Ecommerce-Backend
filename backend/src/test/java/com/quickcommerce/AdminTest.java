@@ -17,7 +17,13 @@ import org.junit.jupiter.api.Test;
 /** Admin's tools over real HTTP: prices, opening hours, the order board, cancelling, assigning drivers, suspending accounts. */
 class AdminTest extends ApiTestBase {
 
-    static final String DEFAULT_SETTINGS = "{\"defaultMarkupPercent\":150,\"deliveryFeeCents\":499,\"driverPayCents\":499}";
+    /** Every setting at its starting value, apart from the two STEADY_FEES switches. */
+    static final String DEFAULT_SETTINGS = """
+            {"shopCutPercent":15,"defaultMarkupPercent":150,"deliveryFeeLowCents":599,"deliveryFeeMidCents":499,
+             "deliveryMidFromCents":5000,"freeDeliveryFromCents":10000,"handlingFeeCents":199,"smallCartBelowCents":1500,
+             "smallCartFeeCents":299,"lateNightFeeCents":199,"surgeFeeCents":199,"surgeRatioPercent":200,
+             "driverHourlyCents":2199,"driverPerKmCents":35,"tipOptionsCents":[100,200,500,1000],
+             "lateDeliveryMinutes":20,"locationLostMinutes":10,"dailyViolationLimit":3,"monthlyViolationLimit":6}""";
 
     /** Settings are shared by every test, so put them back after each one. */
     @AfterEach
@@ -56,59 +62,81 @@ class AdminTest extends ApiTestBase {
 
         Res settings = get("/api/admin/settings", admin);
         assertEquals(200, settings.status(), settings.body());
+        assertEquals(15, settings.<Integer>read("$.shopCutPercent"));
         assertEquals(150, settings.<Integer>read("$.defaultMarkupPercent"));
-        assertEquals(499, settings.<Integer>read("$.deliveryFeeCents"));
-        assertEquals(499, settings.<Integer>read("$.driverPayCents"));
+        assertEquals(599, settings.<Integer>read("$.deliveryFeeLowCents"));
+        assertEquals(499, settings.<Integer>read("$.deliveryFeeMidCents"));
+        assertEquals(10000, settings.<Integer>read("$.freeDeliveryFromCents"));
+        assertEquals(199, settings.<Integer>read("$.handlingFeeCents"));
+        assertEquals(1500, settings.<Integer>read("$.smallCartBelowCents"));
+        assertEquals(2199, settings.<Integer>read("$.driverHourlyCents"));
+        assertEquals(List.of(100, 200, 500, 1000), settings.<List<Integer>>read("$.tipOptionsCents"));
         assertTrue(get("/api/catalog/categories", customer).<List<String>>read("$").contains(category));
 
         // A markup for one category.
         Res markup = put("/api/admin/settings/markups/" + category.replace(" ", "%20"), admin, "{\"markupPercent\":200}");
         assertEquals(200, markup.status(), markup.body());
         assertEquals(List.of(200), markup.<List<Integer>>read("$.categoryMarkups[?(@.category == '" + category + "')].markupPercent"));
-        assertEquals(2000, feedPrice(customer, "Chips " + tag), "shop price 1000 x 2.0 for this category");
+        assertEquals(1999, feedPrice(customer, "Chips " + tag), "10.00 x 2.0 for this category, down to 19.99");
 
         Res before = order(customer, s.shopId(), item(s.rowId(), 1), item(chips, 1));
-        assertEquals(List.of(1500), before.<List<Integer>>read("$.items[?(@.name != 'Chips " + tag + "')].unitPriceCents"),
+        assertEquals(List.of(1499), before.<List<Integer>>read("$.items[?(@.name != 'Chips " + tag + "')].unitPriceCents"),
                 "other categories keep the default 1.5x");
-        assertEquals(List.of(2000), before.<List<Integer>>read("$.items[?(@.name == 'Chips " + tag + "')].unitPriceCents"));
-        assertEquals(499, before.<Integer>read("$.deliveryFeeCents"));
-        assertEquals(499, get("/api/admin/orders/" + before.id(), admin).<Integer>read("$.driverPayCents"));
+        assertEquals(List.of(1999), before.<List<Integer>>read("$.items[?(@.name == 'Chips " + tag + "')].unitPriceCents"));
+        assertEquals(599, before.<Integer>read("$.deliveryFeeCents"));
+        assertEquals(1499 + 1999 + 599 + 199, before.<Integer>read("$.totalCents"));
 
-        // New defaults, fee and driver pay.
-        Res changed = put("/api/admin/settings", admin, "{\"defaultMarkupPercent\":120,\"deliveryFeeCents\":299,\"driverPayCents\":650}");
+        // Change the cut, the default markup and two fees. Only the fields sent change.
+        Res changed = put("/api/admin/settings", admin,
+                "{\"shopCutPercent\":20,\"defaultMarkupPercent\":120,\"deliveryFeeLowCents\":299,\"handlingFeeCents\":99}");
         assertEquals(200, changed.status(), changed.body());
+        assertEquals(20, changed.<Integer>read("$.shopCutPercent"));
+        assertEquals(1500, changed.<Integer>read("$.smallCartBelowCents"), "untouched settings keep their values");
         Res after = order(customer, s.shopId(), item(s.rowId(), 1));
-        assertEquals(1200, after.<Integer>read("$.items[0].unitPriceCents"));
+        assertEquals(1199, after.<Integer>read("$.items[0].unitPriceCents"), "10.00 x 1.2, down to 11.99");
         assertEquals(299, after.<Integer>read("$.deliveryFeeCents"));
-        assertEquals(1499, after.<Integer>read("$.totalCents"));
-        assertEquals(650, get("/api/admin/orders/" + after.id(), admin).<Integer>read("$.driverPayCents"));
+        assertEquals(99, after.<Integer>read("$.handlingFeeCents"));
+        assertEquals(299, after.<Integer>read("$.smallCartFeeCents"), "11.99 is under the $15 small-cart line");
+        assertEquals(1199 + 299 + 99 + 299, after.<Integer>read("$.totalCents"));
+        assertEquals(800, get("/api/admin/orders/" + after.id(), admin).<Integer>read("$.items[0].shopPriceCents"), "10.00 less 20%");
 
         Res old = get("/api/orders/" + before.id(), customer);
-        assertEquals(499, old.<Integer>read("$.deliveryFeeCents"), "a placed order keeps its fee");
-        assertEquals(List.of(1500, 2000), old.<List<Integer>>read("$.items[*].unitPriceCents").stream().sorted().toList(),
+        assertEquals(599, old.<Integer>read("$.deliveryFeeCents"), "a placed order keeps its fees");
+        assertEquals(199, old.<Integer>read("$.handlingFeeCents"));
+        assertEquals(List.of(1499, 1999), old.<List<Integer>>read("$.items[*].unitPriceCents").stream().sorted().toList(),
                 "and its prices");
-        assertEquals(499, get("/api/admin/orders/" + before.id(), admin).<Integer>read("$.driverPayCents"), "and its driver pay");
+        assertEquals(List.of(850, 850), get("/api/admin/orders/" + before.id(), admin).<List<Integer>>read("$.items[*].shopPriceCents"),
+                "and its shop payouts");
 
         // Removing the category markup falls back to the default.
         String path = "/api/admin/settings/markups/" + category.replace(" ", "%20");
         assertEquals(204, delete(path, admin).status());
-        assertEquals(1200, feedPrice(customer, "Chips " + tag));
+        assertEquals(1199, feedPrice(customer, "Chips " + tag));
         assertEquals(404, delete(path, admin).status());
+
+        // Shops see their payout next to their own price.
+        Res listing = get("/api/shops/me/products?size=100", s.shop());
+        assertEquals(List.of(800), listing.<List<Integer>>read("$.content[?(@.id == " + s.rowId() + ")].payoutCents"));
+        assertEquals(List.of(1000), listing.<List<Integer>>read("$.content[?(@.id == " + s.rowId() + ")].priceCents"));
     }
 
     @Test
     void settingsAreValidatedAndAdminOnly() {
         String admin = adminToken();
-        for (String bad : List.of("{}", "{\"defaultMarkupPercent\":99,\"deliveryFeeCents\":499,\"driverPayCents\":499}",
-                "{\"defaultMarkupPercent\":1001,\"deliveryFeeCents\":499,\"driverPayCents\":499}",
-                "{\"defaultMarkupPercent\":150,\"deliveryFeeCents\":-1,\"driverPayCents\":499}",
-                "{\"defaultMarkupPercent\":150,\"deliveryFeeCents\":499,\"driverPayCents\":10001}")) {
+        for (String bad : List.of("{\"defaultMarkupPercent\":99}", "{\"defaultMarkupPercent\":1001}",
+                "{\"shopCutPercent\":91}", "{\"deliveryFeeLowCents\":-1}", "{\"driverHourlyCents\":20001}",
+                "{\"surgeMode\":\"MAYBE\"}", "{\"tipOptionsCents\":[]}", "{\"tipOptionsCents\":[0]}",
+                "{\"deliveryMidFromCents\":20000}", "{\"dailyViolationLimit\":10,\"monthlyViolationLimit\":5}",
+                "{\"lateNightStart\":\"25:00\"}")) {
             assertEquals(400, put("/api/admin/settings", admin, bad).status(), bad);
         }
+        assertEquals(200, put("/api/admin/settings", admin, "{}").status(), "an empty change is allowed and changes nothing");
         assertEquals(400, put("/api/admin/settings/markups/Dairy", admin, "{\"markupPercent\":50}").status(),
                 "never below the shop's own price");
         assertEquals(400, put("/api/admin/settings/markups/%20", admin, "{\"markupPercent\":150}").status());
-        assertEquals(150, get("/api/admin/settings", admin).<Integer>read("$.defaultMarkupPercent"), "nothing changed");
+        Res now = get("/api/admin/settings", admin);
+        assertEquals(150, now.<Integer>read("$.defaultMarkupPercent"), "nothing changed");
+        assertEquals(15, now.<Integer>read("$.shopCutPercent"));
 
         String shop = shopOwner();
         String customer = customer();
@@ -203,10 +231,11 @@ class AdminTest extends ApiTestBase {
         assertEquals((int) s.shopId(), detail.<Integer>read("$.shop.id"));
         assertEquals("Test Customer", detail.read("$.customer.name"));
         assertNull(detail.read("$.driver"));
-        assertEquals(1000, detail.<Integer>read("$.items[0].shopPriceCents"), "admin sees both prices");
-        assertEquals(1500, detail.<Integer>read("$.items[0].customerPriceCents"));
-        assertEquals(3000, detail.<Integer>read("$.shopPayoutCents"));
-        assertEquals(4500 + 499, detail.<Integer>read("$.totalCents"));
+        assertEquals(850, detail.<Integer>read("$.items[0].shopPriceCents"), "admin sees both prices");
+        assertEquals(1499, detail.<Integer>read("$.items[0].customerPriceCents"));
+        assertEquals(2550, detail.<Integer>read("$.shopPayoutCents"));
+        assertEquals(4497 + 599 + 199, detail.<Integer>read("$.totalCents"));
+        assertEquals(4497 - 2550 + 599 + 199, detail.<Integer>read("$.platformNetCents"), "no driver pay yet");
         assertEquals("9 Door St", detail.read("$.address.addressLine"));
         assertEquals("Gate code 4411", detail.read("$.note"));
         assertFalse(detail.body().contains("deliveryCode"), "not even admin is sent the delivery code");

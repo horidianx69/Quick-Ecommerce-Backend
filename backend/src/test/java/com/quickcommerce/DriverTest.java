@@ -85,7 +85,8 @@ class DriverTest extends ApiTestBase {
         assertEquals(1, jobs.<List<?>>read("$").size());
         assertEquals((int) orderId, jobs.<Integer>read("$[0].orderId"));
         assertEquals(3, jobs.<Integer>read("$[0].units"), "how many units, not what they are");
-        assertEquals(499, jobs.<Integer>read("$[0].payCents"));
+        int estimate = jobs.<Integer>read("$[0].payCents");
+        assertTrue(estimate > 0 && estimate < 2000, "an estimate of hourly pay plus km for about 2 km, got " + estimate);
         double pickupKm = jobs.<Number>read("$[0].pickupKm").doubleValue();
         double dropKm = jobs.<Number>read("$[0].dropKm").doubleValue();
         assertTrue(pickupKm > 0.2 && pickupKm < 1.2, "driver is about 0.6 km from the shop, got " + pickupKm);
@@ -160,7 +161,10 @@ class DriverTest extends ApiTestBase {
         assertEquals(404, get("/api/drivers/me/delivery", driver.token()).status());
         Res history = get("/api/drivers/me/deliveries", driver.token());
         assertEquals(1, history.<Integer>read("$.page.totalElements"));
-        assertEquals(499, history.<Integer>read("$.content[0].payCents"));
+        int paid = history.<Integer>read("$.content[0].payCents");
+        assertTrue(paid > 0, "engaged time plus km allowance");
+        assertEquals(paid, get("/api/admin/orders/" + orderId, s.admin()).<Integer>read("$.driverPayCents"));
+        assertEquals(0, history.<Integer>read("$.content[0].tipCents"));
         assertEquals(3, history.<Integer>read("$.content[0].units"));
         long next = acceptedOrder(s, s.customer(), 1);
         assertEquals(200, post("/api/drivers/me/jobs/" + next + "/accept", driver.token(), null).status());

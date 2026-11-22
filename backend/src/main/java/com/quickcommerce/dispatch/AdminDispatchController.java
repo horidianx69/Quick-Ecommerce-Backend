@@ -38,7 +38,7 @@ public class AdminDispatchController {
         if (driver.getStatus() != Driver.Status.APPROVED) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "That driver is not approved");
         }
-        return orders.adminAssignDriver(orderId, driver.getUserId());
+        return orders.adminAssignDriver(orderId, driver.getUserId(), driver.getLatitude(), driver.getLongitude());
     }
 
     /** Takes the order off its driver before pickup; it goes back to the job list for any driver. */

@@ -3,6 +3,7 @@ package com.quickcommerce.dispatch;
 import com.quickcommerce.auth.Throttle;
 import com.quickcommerce.common.Geo;
 import com.quickcommerce.common.Paging;
+import com.quickcommerce.order.OrderService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -44,12 +45,14 @@ public class DriverController {
     public record StatusRequest(@NotNull Driver.Status status) {}
 
     private final DriverRepository drivers;
+    private final OrderService orderService;
     private final Throttle throttle;
     private final int maxPingsPerMinute;
 
-    DriverController(DriverRepository drivers, Throttle throttle,
+    DriverController(DriverRepository drivers, OrderService orderService, Throttle throttle,
             @Value("${app.dispatch.max-pings-per-minute}") int maxPingsPerMinute) {
         this.drivers = drivers;
+        this.orderService = orderService;
         this.throttle = throttle;
         this.maxPingsPerMinute = maxPingsPerMinute;
     }
@@ -87,9 +90,13 @@ public class DriverController {
         return drivers.findById(userId).orElseThrow();
     }
 
+    /** End of a shift. Not allowed while holding an order: the customer and the location checks need the pings. */
     @PostMapping("/api/drivers/me/offline")
     @Transactional
     Driver goOffline(@AuthenticationPrincipal Jwt jwt) {
+        if (orderService.findActiveDelivery(id(jwt)).isPresent()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Finish or give back your delivery before going offline");
+        }
         if (drivers.goOffline(id(jwt)) == 0) {
             throw noProfile();
         }

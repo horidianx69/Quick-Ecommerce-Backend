@@ -55,6 +55,19 @@ abstract class ApiTestBase {
 
     final HttpClient http = HttpClient.newHttpClient();
 
+    /**
+     * The late-night and surge fees depend on the clock and on which drivers are
+     * online, so totals would change with the time a test runs. Tests start with
+     * both off; tests of those fees switch them on for themselves.
+     */
+    static final String STEADY_FEES = "{\"surgeMode\":\"OFF\",\"lateNightStart\":\"00:00\",\"lateNightEnd\":\"00:00\"}";
+
+    @org.junit.jupiter.api.BeforeEach
+    void steadyFees() {
+        Res res = put("/api/admin/settings", adminToken(), STEADY_FEES);
+        assertEquals(200, res.status(), res.body());
+    }
+
     record Res(int status, String body, HttpHeaders headers) {
         <T> T read(String jsonPath) {
             return JsonPath.read(body, jsonPath);
@@ -166,11 +179,18 @@ abstract class ApiTestBase {
         return token;
     }
 
+    /** Logging in costs a password check and counts toward the per-IP limit, so the admin token is reused. */
+    static String cachedAdminToken;
+
     String adminToken() {
+        if (cachedAdminToken != null && get("/api/auth/me", cachedAdminToken).status() == 200) {
+            return cachedAdminToken;
+        }
         Res res = post("/api/auth/login", null, loginJson(adminEmail, adminPassword));
         assertEquals(200, res.status(), res.body());
         String token = res.read("$.token");
         assertNotNull(token);
+        cachedAdminToken = token;
         return token;
     }
 
