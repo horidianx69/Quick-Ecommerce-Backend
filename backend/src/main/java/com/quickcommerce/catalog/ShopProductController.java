@@ -1,6 +1,7 @@
 package com.quickcommerce.catalog;
 
 import com.quickcommerce.common.Paging;
+import com.quickcommerce.common.Settings;
 import com.quickcommerce.shop.ShopService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
@@ -42,28 +43,38 @@ public class ShopProductController {
     /** Positive = stock arrived. Negative = correction (damaged, miscounted). Never zero. */
     public record StockRequest(@NotNull @Min(-100_000) @Max(100_000) Integer change) {}
 
+    /**
+     * A product on the shop's shelf. priceCents is the shop's own price (what it entered);
+     * payoutCents is what the shop is paid per unit after the platform's cut.
+     */
+    public record Listing(Long id, Long productId, String name, String brand, String imageUrl, String category,
+            int priceCents, int payoutCents, int quantity) {}
+
     private final ShopProductRepository shopProducts;
+    private final Settings settings;
     private final CatalogProductRepository catalog;
     private final ShopService shopService;
 
-    ShopProductController(ShopProductRepository shopProducts, CatalogProductRepository catalog,
+    ShopProductController(ShopProductRepository shopProducts, CatalogProductRepository catalog, Settings settings,
             ShopService shopService) {
         this.shopProducts = shopProducts;
+        this.settings = settings;
         this.catalog = catalog;
         this.shopService = shopService;
     }
 
     @GetMapping
-    Page<ShopProductView> list(@AuthenticationPrincipal Jwt jwt,
+    Page<Listing> list(@AuthenticationPrincipal Jwt jwt,
             @RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "20") int size) {
-        return shopProducts.list(shopId(jwt), Paging.of(page, size));
+        Settings.Values s = settings.current();
+        return shopProducts.list(shopId(jwt), Paging.of(page, size)).map(v -> listing(v, s));
     }
 
     /** Adds an approved catalog product to this shop. The same product twice is a 409. */
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     @Transactional
-    ShopProductView add(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody AddRequest req) {
+    Listing add(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody AddRequest req) {
         Long shopId = shopId(jwt);
         catalog.findById(req.productId())
                 .filter(p -> p.getStatus() == CatalogProduct.Status.APPROVED)
@@ -79,7 +90,7 @@ public class ShopProductController {
 
     @PutMapping("/{id}")
     @Transactional
-    ShopProductView setPrice(@AuthenticationPrincipal Jwt jwt, @PathVariable Long id,
+    Listing setPrice(@AuthenticationPrincipal Jwt jwt, @PathVariable Long id,
             @Valid @RequestBody PriceRequest req) {
         Long shopId = shopId(jwt);
         if (shopProducts.setPrice(shopId, id, req.priceCents()) == 0) {
@@ -90,7 +101,7 @@ public class ShopProductController {
 
     @PostMapping("/{id}/stock")
     @Transactional
-    ShopProductView changeStock(@AuthenticationPrincipal Jwt jwt, @PathVariable Long id,
+    Listing changeStock(@AuthenticationPrincipal Jwt jwt, @PathVariable Long id,
             @Valid @RequestBody StockRequest req) {
         if (req.change() == 0) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "change must not be zero");
@@ -119,8 +130,13 @@ public class ShopProductController {
         return shopService.requireShop(jwt).getId();
     }
 
-    private ShopProductView view(Long shopId, Long id) {
-        return shopProducts.view(shopId, id).orElseThrow(ShopProductController::notFound);
+    private Listing view(Long shopId, Long id) {
+        return listing(shopProducts.view(shopId, id).orElseThrow(ShopProductController::notFound), settings.current());
+    }
+
+    private static Listing listing(ShopProductView v, Settings.Values s) {
+        return new Listing(v.id(), v.productId(), v.name(), v.brand(), v.imageUrl(), v.category(), v.priceCents(),
+                s.payout(v.priceCents()), v.quantity());
     }
 
     private static ResponseStatusException notFound() {

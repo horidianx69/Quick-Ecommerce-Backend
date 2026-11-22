@@ -27,10 +27,12 @@ class OrderTest extends ApiTestBase {
         long id = placed.id();
         assertEquals("PLACED", placed.read("$.status"));
         assertEquals("Corner Stop", placed.read("$.shopName"));
-        assertEquals(1500, placed.<Integer>read("$.items[0].unitPriceCents"), "shop price 1000 x 1.5 markup");
-        assertEquals(4500, placed.<Integer>read("$.subtotalCents"));
-        assertEquals(499, placed.<Integer>read("$.deliveryFeeCents"));
-        assertEquals(4999, placed.<Integer>read("$.totalCents"));
+        assertEquals(1499, placed.<Integer>read("$.items[0].unitPriceCents"), "shop price 10.00 x 1.5 = 15.00, down to 14.99");
+        assertEquals(4497, placed.<Integer>read("$.subtotalCents"));
+        assertEquals(599, placed.<Integer>read("$.deliveryFeeCents"), "items under $50");
+        assertEquals(199, placed.<Integer>read("$.handlingFeeCents"));
+        assertEquals(0, placed.<Integer>read("$.smallCartFeeCents"));
+        assertEquals(4497 + 599 + 199, placed.<Integer>read("$.totalCents"));
         assertEquals(7, stockOf(s.shop(), s.rowId()), "3 units are held the moment the order is placed");
 
         // The customer never sees the shop's price, payout, address or location.
@@ -41,8 +43,8 @@ class OrderTest extends ApiTestBase {
         Res inbox = get("/api/shops/me/orders?status=PLACED", s.shop());
         assertEquals(1, inbox.<Integer>read("$.page.totalElements"));
         assertEquals((int) id, inbox.<Integer>read("$.content[0].id"));
-        assertEquals(1000, inbox.<Integer>read("$.content[0].items[0].unitPriceCents"), "the shop sees its own price");
-        assertEquals(3000, inbox.<Integer>read("$.content[0].payoutCents"));
+        assertEquals(850, inbox.<Integer>read("$.content[0].items[0].unitPriceCents"), "the shop sees its payout: 10.00 less 15%");
+        assertEquals(2550, inbox.<Integer>read("$.content[0].payoutCents"));
         // The shop never sees the customer's price or where the customer lives.
         for (String secret : List.of("customerPriceCents", "totalCents", "subtotalCents", "77 Customer Rd", "latitude", "customerId")) {
             assertFalse(inbox.body().contains(secret), "shop view leaks " + secret + ": " + inbox.body());
@@ -66,15 +68,33 @@ class OrderTest extends ApiTestBase {
     }
 
     @Test
-    void customerPriceRoundsToTheNearestCent() {
+    void pricesFollowTheSheet() {
+        // The five products from the pricing sheet: shop price -> shop paid (less 15%) -> customer (x1.5, down to .49/.99).
         String admin = adminToken();
-        Stocked s = stockedShop(admin, 333, 10); // 333 x 1.5 = 499.5
-        long oneCent = addStock(s.shop(), admin, 1, 10); // 1 x 1.5 = 1.5
+        Stocked s = stockedShop(admin, 349, 10); // Monster
+        long snickers = addStock(s.shop(), admin, 179, 10);
+        long yogurt = addStock(s.shop(), admin, 829, 10);
+        long lays = addStock(s.shop(), admin, 599, 10);
+        long cookie = addStock(s.shop(), admin, 499, 10);
 
-        Res placed = order(customer(), s.shopId(), item(s.rowId(), 1), item(oneCent, 1));
-        List<Integer> prices = placed.read("$.items[*].unitPriceCents");
-        assertTrue(prices.containsAll(List.of(500, 2)), "got " + prices);
-        assertEquals(502, placed.<Integer>read("$.subtotalCents"));
+        Res placed = order(customer(), s.shopId(), item(s.rowId(), 1), item(snickers, 1), item(yogurt, 1), item(lays, 1),
+                item(cookie, 1));
+        assertEquals(List.of(249, 499, 699, 849, 1199), placed.<List<Integer>>read("$.items[*].unitPriceCents").stream()
+                .sorted().toList(), "4.99, 2.49, 11.99, 8.49, 6.99 as on the sheet");
+        assertEquals(3495, placed.<Integer>read("$.subtotalCents"), "34.95");
+        assertEquals(3495 + 599 + 199, placed.<Integer>read("$.totalCents"), "34.95 + 5.99 delivery + 1.99 handling");
+
+        Res forAdmin = get("/api/admin/orders/" + placed.id(), admin);
+        assertEquals(List.of(152, 296, 424, 509, 704), forAdmin.<List<Integer>>read("$.items[*].shopPriceCents").stream()
+                .sorted().toList(), "2.96, 1.52, 7.04, 5.09, 4.24: each rounded down to the cent");
+        assertEquals(2085, forAdmin.<Integer>read("$.shopPayoutCents"));
+        assertEquals(3495 - 2085, forAdmin.<Integer>read("$.itemMarginCents"), "we keep 14.10 on the items");
+
+        // A price so low that rounding down would sell at a loss rounds up instead.
+        long penny = addStock(s.shop(), admin, 1, 10);
+        Res tiny = order(customer(), s.shopId(), item(penny, 1));
+        assertEquals(49, tiny.<Integer>read("$.items[0].unitPriceCents"));
+        assertEquals(299, tiny.<Integer>read("$.smallCartFeeCents"), "under $15: small-cart fee");
     }
 
     @Test
@@ -133,7 +153,7 @@ class OrderTest extends ApiTestBase {
 
         Res placed = order(customer, s.shopId(), item(s.rowId(), 2), item(rowB, 3));
         long id = placed.id();
-        List<Integer> bLine = placed.read("$.items[?(@.unitPriceCents == 750)].id");
+        List<Integer> bLine = placed.read("$.items[?(@.unitPriceCents == 749)].id");
         long itemB = bLine.get(0);
         List<Integer> allItems = placed.read("$.items[*].id");
         String accept = "/api/shops/me/orders/" + id + "/accept";
@@ -145,12 +165,14 @@ class OrderTest extends ApiTestBase {
 
         Res accepted = post(accept, s.shop(), "{\"unavailableItemIds\":[" + itemB + "]}");
         assertEquals(200, accepted.status(), accepted.body());
-        assertEquals(2000, accepted.<Integer>read("$.payoutCents"), "the shop is paid only for what it supplies");
+        assertEquals(1700, accepted.<Integer>read("$.payoutCents"), "the shop is paid only for what it supplies: 2 x 8.50");
 
         Res forCustomer = get("/api/orders/" + id, customer);
         assertEquals(List.of(true), forCustomer.<List<Boolean>>read("$.items[?(@.id == " + itemB + ")].unavailable"));
-        assertEquals(3000, forCustomer.<Integer>read("$.subtotalCents"), "the customer does not pay for the missing item");
-        assertEquals(3499, forCustomer.<Integer>read("$.totalCents"));
+        assertEquals(2998, forCustomer.<Integer>read("$.subtotalCents"), "the customer does not pay for the missing item");
+        assertEquals(499, forCustomer.<Integer>read("$.deliveryFeeCents"),
+                "the fee was set at checkout ($52.45 of items) and does not go up when an item is missing");
+        assertEquals(2998 + 499 + 199, forCustomer.<Integer>read("$.totalCents"));
 
         assertEquals(0, stockOf(s.shop(), rowB), "the count on file was wrong, so the product goes out of stock");
         assertEquals(8, stockOf(s.shop(), s.rowId()), "the other product is untouched");
@@ -205,7 +227,7 @@ class OrderTest extends ApiTestBase {
         Res sneaky = post("/api/orders", customer, orderJson(s.shopId(),
                 "{\"shopProductId\":%d,\"quantity\":1,\"priceCents\":1,\"customerPriceCents\":1,\"unitPriceCents\":1}".formatted(s.rowId())));
         assertEquals(201, sneaky.status(), sneaky.body());
-        assertEquals(1500, sneaky.<Integer>read("$.items[0].unitPriceCents"));
+        assertEquals(1499, sneaky.<Integer>read("$.items[0].unitPriceCents"));
 
         // A suspended shop stops taking orders at once.
         put("/api/admin/shops/" + s.shopId() + "/status", admin, "{\"status\":\"SUSPENDED\"}");

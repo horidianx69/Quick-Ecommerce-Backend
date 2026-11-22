@@ -46,9 +46,18 @@ public class Order {
     private double latitude;
     private double longitude;
     private String note;
+    /** Fees, frozen when the order is placed. */
     private int deliveryFeeCents;
-    /** What the driver earns for this delivery, frozen when the order is placed. */
-    private int driverPayCents;
+    private int handlingFeeCents;
+    private int smallCartFeeCents;
+    private int lateNightFeeCents;
+    private int surgeFeeCents;
+    /** Set at checkout or afterwards (OrderRepository.tip). Goes to the driver in full. */
+    @Column(updatable = false)
+    private int tipCents;
+    /** null, ASKED, RECEIVED or NOT_RECEIVED. Changed only by OrderRepository. */
+    @Column(updatable = false)
+    private String receiptStatus;
     @Column(updatable = false)
     private Instant createdAt;
 
@@ -62,4 +71,9 @@ public class Order {
     /** Why admin cancelled the order. Null when the customer cancelled, or the order was not cancelled. */
     @Column(updatable = false)
     private String cancelReason;
+
+    /** Every fee, without the tip. */
+    public int feesCents() {
+        return deliveryFeeCents + handlingFeeCents + smallCartFeeCents + lateNightFeeCents + surgeFeeCents;
+    }
 }

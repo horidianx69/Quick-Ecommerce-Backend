@@ -3,6 +3,7 @@ package com.quickcommerce.browse;
 import com.quickcommerce.browse.BrowseQueries.Area;
 import com.quickcommerce.browse.BrowseQueries.OfferRow;
 import com.quickcommerce.common.Geo;
+import com.quickcommerce.common.Rating;
 import com.quickcommerce.common.Paging;
 import com.quickcommerce.order.Pricing;
 import com.quickcommerce.order.Pricing.Prices;
@@ -29,11 +30,13 @@ public class BrowseController {
     static final int MAX_SEARCH_LENGTH = 60;
 
     /** What to put in the cart: send shopId + shopProductId to POST /api/orders. priceCents is the customer's price. */
-    public record Offer(long shopProductId, long shopId, int priceCents, double distanceKm, int etaMinutes) {}
+    /** shopRating: the shop's average stars from customers and drivers, shown next to the distance (never the name). */
+    public record Offer(long shopProductId, long shopId, int priceCents, double distanceKm, int etaMinutes,
+            Rating shopRating) {}
 
     /** offer = the nearest shop that has it. otherShops = how many more nearby shops also have it. */
     public record ProductCard(long productId, String name, String brand, String imageUrl, String category,
-            Offer offer, int otherShops) {}
+            Offer offer, int otherShops, Rating rating) {}
 
     /** hasMore = ask for page + 1. There is no total count: a feed scrolls, and counting would double the work. */
     public record Feed(List<ProductCard> content, int page, int size, boolean hasMore) {}
@@ -74,7 +77,8 @@ public class BrowseController {
     List<Offer> offers(@PathVariable long productId, @RequestParam double lat, @RequestParam double lng) {
         Prices prices = pricing.current();
         return queries.offers(area(lat, lng), productId).stream()
-                .map(row -> offer(prices, row.shopProductId(), row.shopId(), row.shopPriceCents(), row.category(), row.km()))
+                .map(row -> offer(prices, row.shopProductId(), row.shopId(), row.shopPriceCents(), row.category(), row.km(),
+                        row.shopRating()))
                 .toList();
     }
 
@@ -108,12 +112,15 @@ public class BrowseController {
 
     private ProductCard card(Prices prices, OfferRow row) {
         return new ProductCard(row.productId(), row.name(), row.brand(), row.imageUrl(), row.category(),
-                offer(prices, row.shopProductId(), row.shopId(), row.shopPriceCents(), row.category(), row.km()),
-                row.shops() - 1);
+                offer(prices, row.shopProductId(), row.shopId(), row.shopPriceCents(), row.category(), row.km(),
+                        row.shopRating()),
+                row.shops() - 1, row.productRating());
     }
 
-    private Offer offer(Prices prices, long shopProductId, long shopId, int shopPriceCents, String category, double km) {
-        return new Offer(shopProductId, shopId, prices.customerPrice(shopPriceCents, category), roundKm(km), eta(km));
+    private Offer offer(Prices prices, long shopProductId, long shopId, int shopPriceCents, String category, double km,
+            Rating shopRating) {
+        return new Offer(shopProductId, shopId, prices.customerPrice(shopPriceCents, category), roundKm(km), eta(km),
+                shopRating);
     }
 
     // ponytail: a fixed prep time plus a fixed speed. Replace with real numbers

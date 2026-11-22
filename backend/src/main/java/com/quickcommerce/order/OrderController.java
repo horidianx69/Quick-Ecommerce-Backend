@@ -44,7 +44,20 @@ public class OrderController {
             @NotBlank @Size(min = 8, max = 64) String idempotencyKey,
             @NotEmpty @Size(max = 50) List<@Valid @NotNull ItemRequest> items,
             @NotNull @Valid DeliveryAddress address,
-            @Size(max = 500) String note) {}
+            @Size(max = 500) String note,
+            @Min(0) Integer tipCents) {}
+
+    /** Same as placing, without the idempotency key: what would this cost right now? */
+    public record QuoteRequest(
+            @NotNull Long shopId,
+            @NotEmpty @Size(max = 50) List<@Valid @NotNull ItemRequest> items,
+            @NotNull @Valid DeliveryAddress address,
+            @Min(0) Integer tipCents) {}
+
+    /** One of the tip options from the quote's tipOptionsCents. */
+    public record TipRequest(@NotNull @Min(1) Integer tipCents) {}
+
+    public record ReceiptRequest(@NotNull Boolean received) {}
 
     private final OrderService orderService;
 
@@ -55,15 +68,45 @@ public class OrderController {
     /** 201 for a new order, 200 when the same idempotencyKey was already used (the first order is returned). */
     @PostMapping
     ResponseEntity<CustomerOrderView> place(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody PlaceRequest req) {
+        var placed = orderService.place(customerId(jwt), req.shopId(), req.idempotencyKey(), quantities(req.items()),
+                req.address(), req.note(), req.tipCents() == null ? 0 : req.tipCents());
+        return ResponseEntity.status(placed.created() ? HttpStatus.CREATED : HttpStatus.OK).body(placed.order());
+    }
+
+    /**
+     * Every fee and the total for this cart, without ordering. The app shows this
+     * at checkout, so the customer sees the delivery, handling, small-cart,
+     * late-night and surge fees before tapping "Place order".
+     */
+    @PostMapping("/quote")
+    OrderService.Quote quote(@Valid @RequestBody QuoteRequest req) {
+        return orderService.quote(req.shopId(), quantities(req.items()), req.address(),
+                req.tipCents() == null ? 0 : req.tipCents());
+    }
+
+    /** Adds a tip after checkout, if none was given: until 24 h after delivery. */
+    @PostMapping("/{id}/tip")
+    CustomerOrderView tip(@AuthenticationPrincipal Jwt jwt, @PathVariable Long id, @Valid @RequestBody TipRequest req) {
+        return orderService.tip(customerId(jwt), id, req.tipCents());
+    }
+
+    /**
+     * "Did you receive your order?". Answer when receiptStatus is ASKED, or report
+     * "not received" (received=false) within 24 h of delivery.
+     */
+    @PostMapping("/{id}/receipt")
+    CustomerOrderView receipt(@AuthenticationPrincipal Jwt jwt, @PathVariable Long id, @Valid @RequestBody ReceiptRequest req) {
+        return orderService.answerReceipt(customerId(jwt), id, req.received());
+    }
+
+    private static Map<Long, Integer> quantities(List<ItemRequest> items) {
         Map<Long, Integer> quantities = new HashMap<>();
-        for (ItemRequest item : req.items()) {
+        for (ItemRequest item : items) {
             if (quantities.put(item.shopProductId(), item.quantity()) != null) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Each product can appear once in items");
             }
         }
-        var placed = orderService.place(customerId(jwt), req.shopId(), req.idempotencyKey(), quantities,
-                req.address(), req.note());
-        return ResponseEntity.status(placed.created() ? HttpStatus.CREATED : HttpStatus.OK).body(placed.order());
+        return quantities;
     }
 
     /** The caller's own orders, newest first. */

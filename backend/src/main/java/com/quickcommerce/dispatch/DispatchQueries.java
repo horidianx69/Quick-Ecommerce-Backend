@@ -15,7 +15,7 @@ import org.springframework.stereotype.Repository;
 @Repository
 class DispatchQueries {
 
-    record JobRow(long orderId, String status, Instant createdAt, int driverPayCents, String city,
+    record JobRow(long orderId, String status, Instant createdAt, String city,
             double pickupKm, double dropKm, int units) {}
 
     /**
@@ -25,11 +25,11 @@ class DispatchQueries {
      */
     private static final String OPEN_JOBS = """
             with open_jobs as materialized (
-                select o.id, o.shop_id, o.status, o.created_at, o.driver_pay_cents, o.city, o.latitude, o.longitude
+                select o.id, o.shop_id, o.status, o.created_at, o.city, o.latitude, o.longitude
                 from orders o
                 where o.driver_id is null and o.status in ('ACCEPTED', 'READY')
             ), near as materialized (
-                select j.id, j.status, j.created_at, j.driver_pay_cents, j.city,
+                select j.id, j.status, j.created_at, j.city,
                        %s as pickup_km,
                        %s as drop_km
                 from open_jobs j
@@ -59,7 +59,7 @@ class DispatchQueries {
                 .param("lng", lng)
                 .param("radiusKm", radiusKm)
                 .query((rs, row) -> new JobRow(rs.getLong("id"), rs.getString("status"),
-                        rs.getTimestamp("created_at").toInstant(), rs.getInt("driver_pay_cents"), rs.getString("city"),
+                        rs.getTimestamp("created_at").toInstant(), rs.getString("city"),
                         rs.getDouble("pickup_km"), rs.getDouble("drop_km"), rs.getInt("units")))
                 .list();
     }

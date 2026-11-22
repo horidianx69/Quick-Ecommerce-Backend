@@ -44,6 +44,28 @@ public interface OrderRepository extends JpaRepository<Order, Long>, JpaSpecific
     @Query("update Order o set o.status = :cancelled, o.cancelReason = :reason where o.id = :id and o.status = :from")
     int cancel(Long id, Status from, Status cancelled, String reason);
 
+    /** Adds a tip once: only while none is set, the order is not closed, and within 24 h of delivery. */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update Order o set o.tipCents = :tip
+            where o.id = :id and o.customerId = :customerId and o.tipCents = 0 and o.status not in :closed
+              and (o.deliveredAt is null or o.deliveredAt > :cutoff)
+            """)
+    int tip(Long id, Long customerId, int tip, Collection<Status> closed, Instant cutoff);
+
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("update Order o set o.receiptStatus = 'ASKED' where o.id = :id and o.receiptStatus is null")
+    int askReceipt(Long id);
+
+    /** Records the customer's answer once: to an ASKED question, or a report made within 24 h of delivery. */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update Order o set o.receiptStatus = :answer
+            where o.id = :id and o.customerId = :customerId and o.status = :delivered
+              and (o.receiptStatus = 'ASKED' or (o.receiptStatus is null and o.deliveredAt > :cutoff))
+            """)
+    int answerReceipt(Long id, Long customerId, String answer, Status delivered, Instant cutoff);
+
     // ------------------------------------------------------- driver steps
 
     /** Admin's assignment: sets the driver whether or not the order already had one. */

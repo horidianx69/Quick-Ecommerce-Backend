@@ -47,6 +47,12 @@ public class StockService {
         return shopProducts.viewsIn(shopId, quantities.keySet());
     }
 
+    /** The shop's products with today's price and stock, without taking anything. For price quotes. */
+    @Transactional(readOnly = true)
+    public List<ShopProductView> peek(Long shopId, java.util.Collection<Long> shopProductIds) {
+        return shopProducts.viewsIn(shopId, shopProductIds);
+    }
+
     /** Gives units back. Does nothing if the shop has removed the product since. */
     public void restore(Long shopId, Long shopProductId, int quantity) {
         shopProducts.changeStock(shopId, shopProductId, quantity);

@@ -9,6 +9,10 @@ import org.springframework.test.context.TestPropertySource;
 @TestPropertySource(properties = "app.auth.ip-limit-per-minute=5")
 class IpThrottleTest extends ApiTestBase {
 
+    /** No shared setup here: its admin login would count toward the very limit this test checks. */
+    @Override
+    void steadyFees() {}
+
     @Test
     void oneIpCannotSignUpOrLogInWithoutLimit() {
         for (int i = 0; i < 5; i++) {

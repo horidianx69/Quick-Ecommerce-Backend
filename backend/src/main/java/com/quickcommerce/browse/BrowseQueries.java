@@ -1,6 +1,7 @@
 package com.quickcommerce.browse;
 
 import com.quickcommerce.common.Geo;
+import com.quickcommerce.common.Rating;
 import com.quickcommerce.shop.Shop;
 import java.util.List;
 import java.util.Optional;
@@ -39,9 +40,11 @@ class BrowseQueries {
     }
 
     record OfferRow(long productId, String name, String brand, String imageUrl, String category,
-            long shopProductId, long shopId, int shopPriceCents, double km, int shops) {}
+            long shopProductId, long shopId, int shopPriceCents, double km, int shops, Rating productRating,
+            Rating shopRating) {}
 
-    record ShopOfferRow(long shopProductId, long shopId, int shopPriceCents, String category, double km) {}
+    record ShopOfferRow(long shopProductId, long shopId, int shopPriceCents, String category, double km,
+            Rating shopRating) {}
 
     /** Kilometres from the customer to a shop's PUBLIC point (see Shop.publicLatitude). */
     private static final String KM = Geo.kmSql("s.public_latitude", "s.public_longitude", ":lat", ":lng");
@@ -88,17 +91,27 @@ class BrowseQueries {
                 where (:pattern = '' or lower(p.name) like :pattern or lower(coalesce(p.brand, '')) like :pattern)
                   and (:category = '' or p.category = :category)
             )
-            select * from offers
-            where pick = 1 and (:shopId = 0 or shop_id = :shopId)
-            order by km, name, product_id
-            limit :limit offset :offset
+            , page as materialized (
+                select * from offers
+                where pick = 1 and (:shopId = 0 or shop_id = :shopId)
+                order by km, name, product_id
+                limit :limit offset :offset
+            )
+            -- Ratings are looked up only for the page's rows, not for every product in range.
+            select o.*, rp.stars_sum as p_sum, rp.reviews as p_count, rs.stars_sum as s_sum, rs.reviews as s_count
+            from page o
+            left join rating_totals rp on rp.subject_type = 'PRODUCT' and rp.subject_id = o.product_id
+            left join rating_totals rs on rs.subject_type = 'SHOP' and rs.subject_id = o.shop_id
+            order by o.km, o.name, o.product_id
             """;
 
     private static final String OFFERS = NEARBY + """
-            select sp.id as shop_product_id, sp.shop_id, sp.price_cents, p.category, n.km
+            select sp.id as shop_product_id, sp.shop_id, sp.price_cents, p.category, n.km,
+                   rs.stars_sum as s_sum, rs.reviews as s_count
             from nearby n
             join shop_products sp on sp.shop_id = n.id and sp.product_id = :productId and sp.quantity > 0
             join catalog_products p on p.id = sp.product_id and p.status = 'APPROVED'
+            left join rating_totals rs on rs.subject_type = 'SHOP' and rs.subject_id = sp.shop_id
             order by n.km, sp.price_cents, sp.id
             limit 50
             """;
@@ -125,7 +138,8 @@ class BrowseQueries {
                 .param("offset", offset)
                 .query((rs, row) -> new OfferRow(rs.getLong("product_id"), rs.getString("name"), rs.getString("brand"),
                         rs.getString("image_url"), rs.getString("category"), rs.getLong("shop_product_id"),
-                        rs.getLong("shop_id"), rs.getInt("price_cents"), rs.getDouble("km"), rs.getInt("shops")))
+                        rs.getLong("shop_id"), rs.getInt("price_cents"), rs.getDouble("km"), rs.getInt("shops"),
+                        Rating.of(rs.getLong("p_sum"), rs.getInt("p_count")), Rating.of(rs.getLong("s_sum"), rs.getInt("s_count"))))
                 .list();
     }
 
@@ -134,7 +148,8 @@ class BrowseQueries {
         return in(area, OFFERS)
                 .param("productId", productId)
                 .query((rs, row) -> new ShopOfferRow(rs.getLong("shop_product_id"), rs.getLong("shop_id"),
-                        rs.getInt("price_cents"), rs.getString("category"), rs.getDouble("km")))
+                        rs.getInt("price_cents"), rs.getString("category"), rs.getDouble("km"),
+                        Rating.of(rs.getLong("s_sum"), rs.getInt("s_count"))))
                 .list();
     }
 

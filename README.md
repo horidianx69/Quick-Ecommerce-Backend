@@ -29,7 +29,11 @@ In smaller Canadian towns, many people run their own private shops. They buy sto
 - **Drivers** pick up the order from the shop and deliver it.
 - **Admin** (us) approves shops and drivers, and owns the shared product list.
 
-The platform adds its markup on top of the shop's price (1.5x by default, set by admin per category). The shop is paid its own price.
+Prices work like this (admin can change every number):
+
+- The shop lists a product at its own price, say **$3.49**.
+- The shop is paid that price **less 15%**: **$2.96**.
+- The customer pays **1.5×** the shop's price, rounded **down** to the nearest **.49 or .99**: $5.235 becomes **$4.99**.
 
 **Privacy rule that shapes everything:** a shop's real location is private. Customers only ever see a distance and a delivery time, never the shop's address or exact position.
 
@@ -37,7 +41,7 @@ The platform adds its markup on top of the shop's price (1.5x by default, set by
 
 ## Project status
 
-The backend and the web app are built for all four roles, and a full order has been run through the app end to end. Both are ready to deploy. Three features wait on outside decisions (payments, sales tax, password reset), and two things need doing before a public launch (see [Before launch](#left)).
+The backend and the web app are built for all four roles, and a full order has been run through the app end to end. Both are ready to deploy. Three features wait on outside decisions (payments, sales tax, password reset), and one thing needs doing before a public launch (see [Before launch](#left)). The web app still needs updating for the pricing and pay changes (see [API changes for the web app](#api-changes-for-the-web-app)).
 
 ### Done
 
@@ -50,7 +54,11 @@ The backend and the web app are built for all four roles, and a full order has b
 | Browsing | Product-first feed, change shop, search inside one shop, distance and delivery time; shop location kept private |
 | Drivers and delivery | Driver approval, online status, location pings, job list, pickup, delivery code, history |
 | Customer tracking | Driver's live position on the map, after pickup only |
-| Admin | Dashboard, order board, cancel, assign drivers by hand, markup per category, delivery fee, driver pay |
+| Pricing and fees | Shop paid its price less 15%; customer pays 1.5× rounded down to .49/.99; delivery fee by order size; handling, small-cart, late-night and surge fees; tips; a price quote before ordering |
+| Driver pay | Engaged time (from accepting a job until it ends) × $21.99/h plus $0.35/km, as BC and Ontario rules require; two-week pay statements |
+| Driver rules | Violations (late delivery, lost location, "not received", giving jobs back, guessing the code); daily warning and 30-day ban review for admin; "Did you receive your order?" for suspicious deliveries |
+| Reviews | Customers rate the shop, rider and products; riders rate the shop and customer; averages shown while browsing |
+| Admin | Dashboard, daily charts data, order board, cancel, assign drivers by hand, every price, fee, pay and violation setting, driver alerts, pay periods, reviews |
 | Production basics | Health check, rate limits, overload protection, security tests, race tests, load tests |
 | Web app (`frontend/`) | Landing page; customer shopping, checkout, orders and live tracking; shop orders, products and profile; rider jobs, pickup and delivery; full admin console. Sign-up for riders and shop owners with a "pending review" screen until approved |
 
@@ -61,7 +69,6 @@ The backend and the web app are built for all four roles, and a full order has b
 | Item | Why |
 |---|---|
 | Map tiles from a paid provider (MapTiler, Stadia or Mapbox; all have free tiers) | The web app loads maps straight from OpenStreetMap's free servers, whose rules don't allow production apps |
-| Show the delivery fee at checkout | The backend has no endpoint that gives customers the fee, so checkout says "added when you order" |
 
 **Waiting on a decision**
 
@@ -152,6 +159,21 @@ The app follows the same privacy rules as the backend (see [Who sees what](#who-
 
 The full page-by-endpoint map and a step-by-step test order are in [frontend/README.md](frontend/README.md). The web app has no automated tests yet; that walkthrough is how it is checked.
 
+### API changes for the web app
+
+The pricing, pay and review update changed some API answers. The web app still works, but these screens need updating:
+
+| Screen | Change |
+|---|---|
+| Checkout | Call `POST /api/orders/quote` and show every fee before "Place order". Offer tip buttons from `tipOptionsCents`, and send `tipCents` |
+| Customer order page | New fields: `handlingFeeCents`, `smallCartFeeCents`, `lateNightFeeCents`, `surgeFeeCents`, `tipCents`. `totalCents` now includes them. When `receiptStatus` is `ASKED`, show "Did you receive your order?" (`POST /api/orders/{id}/receipt`). After delivery, offer a tip and a review |
+| Customer feed | New: `rating` on each product, `offer.shopRating` next to the distance |
+| Shop products | New: `payoutCents` next to `priceCents`, so the shop sees its 15% cut |
+| Shop orders | `unitPriceCents` is now the shop's payout per unit |
+| Rider | `payCents` is an estimate until delivered. New: `tipCents` after delivery, pay statements, violations, and a review of the shop and customer. Going offline is refused while holding an order |
+| Admin settings | `deliveryFeeCents` and `driverPayCents` are gone; the settings screen should show every field from `GET /api/admin/settings` |
+| Admin | New: charts from `/api/admin/metrics`, driver alerts, pay periods, and reviews |
+
 ---
 
 ## How it works
@@ -189,15 +211,87 @@ Each step works only from the step before. Steps cannot be skipped or done twice
 
 Admin can step in at any point before delivery: cancel the order with a reason (stock goes back unless it was already picked up), or give it to a driver by hand.
 
-### Prices, fees and opening hours
+### Prices
 
-Admin sets these in the app; nothing needs a redeploy.
+For each product, from the shop's own price **P**:
 
-- **Markup:** a default (150 = 1.5x), plus an optional different markup per catalog category. Never below 100, so the customer never pays less than the shop's price.
-- **Delivery fee** the customer pays, and **driver pay** per delivery.
-- **Opening hours** for each shop: one time window per day, in the shop's local time zone (taken from its province). A shop is only shown to customers, and can only take orders, while it is open. A shop with no hours is closed.
+| | Rule | Example (P = $3.49) |
+|---|---|---|
+| Shop is paid | P less the platform's cut (15%), rounded down to the cent | $2.96 |
+| Customer pays | P × markup (150%), rounded **down** to the nearest .49 or .99 | $5.235 → **$4.99** |
 
-A placed order keeps its prices, fee and driver pay forever, so a later settings change never changes a past order.
+If rounding down would put the customer price at or below the shop's payout (only for very cheap items), it rounds up to the next .49/.99 instead, so no item is sold at a loss. A category can have its own markup.
+
+### Order fees
+
+| Fee | Rule (starting values) |
+|---|---|
+| Delivery | Items under $50: **$5.99** · $50 to $99.99: **$4.99** · $100 and up: **free** |
+| Handling | **$1.99** on every order |
+| Small cart | **$2.99** when items total under **$15** |
+| Late night | **$1.99** between **11 pm and 6 am** in the shop's time zone |
+| Surge | **$1.99** when orders waiting for a driver near the shop are at least **2×** the online drivers near it. Admin can also switch it on or off by hand |
+| Tip | Optional: **$1, $2, $5 or $10**, at checkout or within 24 h of delivery. Goes to the driver in full; the driver sees it only after delivering |
+
+`POST /api/orders/quote` returns all of these for a cart before ordering. Every fee is fixed on the order when it's placed and never goes up afterwards, even if the shop can't supply an item.
+
+### Driver pay
+
+- **Engaged time:** from accepting a job until it ends (delivered, given back, taken off them, or cancelled), including the trip to the shop and waiting there. This is what BC's and Ontario's rules for app-based delivery work count.
+- **Rate:** engaged hours × **$21.99** plus **$0.35 per km**. Km are the straight-line distance from where the driver accepted to the shop, then to the door, ×1.3 for roads.
+- **Pay periods:** two weeks, starting Tuesday 1 December 2026, paid on the Tuesday after each period. Drivers see a statement per period (hours, km, pay, tips); admin sees every driver's and marks each one paid. Bank transfers happen outside the app until payments are built.
+- **Check before launch:** BC's minimum is $21.89 an hour of engaged time (from 1 June 2026, rising each June) plus $0.35/km. Confirm the current rules for your launch province with an employment lawyer or accountant.
+
+### Driver rules
+
+Each of these counts as a violation:
+
+| Violation | When |
+|---|---|
+| Late delivery | Over **20 minutes** from pickup to door |
+| Location lost | No location for over **10 minutes** while holding an order (phone dead, no signal) |
+| Not received | The customer answers "No" to "Did you receive your order?" |
+| Job given back | The driver gives back a job they accepted |
+| Code guessing | The driver uses up the 5 delivery-code tries |
+
+- **3 violations in one day:** admin gets a warning alert.
+- **6 in 30 days:** admin gets a "ban review" alert, and decides to dismiss it or suspend the driver.
+- **Driver's view:** drivers can see their own counts and recent violations.
+- **Going offline:** a driver cannot go offline while holding an order.
+- **"Did you receive your order?"** is asked when a driver marks an order delivered more than 200 m from the address, or lost location during the trip. Customers can also report "not received" within 24 h of any delivery. A "No" alerts admin.
+
+### Reviews
+
+1 to 5 stars, once per person per order, within 7 days of delivery.
+
+| Who | Rates |
+|---|---|
+| Customer | The shop, the rider, and each product received |
+| Rider | The shop (was the pickup smooth?) and the customer |
+
+Customers see product ratings and the shop's rating while browsing, next to the distance, never the shop's name. Admin can read every review and remove abusive ones.
+
+### Opening hours
+
+Admin sets each shop's hours: one time window per day, in the shop's local time zone (taken from its province). A shop is shown to customers, and can take orders, only while it's open. A shop with no hours is closed.
+
+### What admin can change
+
+Everything above, without a redeploy, through `PUT /api/admin/settings`:
+
+- the cut and markup, plus markups per category
+- delivery tiers, and the handling, small-cart, late-night and surge fees
+- the late-night hours, and surge mode and ratio
+- the driver hourly and per-km rates
+- the tip options
+- the violation limits and times
+
+A placed order keeps its prices and fees forever, so a change never alters a past order. `GET /api/admin/metrics` gives daily figures to chart the effect of a change:
+
+- **Orders:** placed, delivered, lost.
+- **Money:** sales, shop payouts, item margin, fees, tips, driver pay and net.
+- **Delivery:** delivery times, late deliveries, surge orders.
+- **Quality:** violations and ratings.
 
 ### Who sees what
 
@@ -208,7 +302,8 @@ A placed order keeps its prices, fee and driver pay forever, so a later settings
 | Distance to the shop | Yes (from a shifted point) | — | Yes | — |
 | Customer name and address | Own | Never | After pickup | Yes |
 | Which products are in the order | Yes | Yes | Never, only how many units | Yes |
-| Prices | Customer price | Shop price and payout | Delivery pay only | All of them |
+| Prices | Customer price and fees | Own price and payout | Own pay (an estimate until delivered) | All of them, plus margin and net |
+| Tip | Own | Never | After delivering | Yes |
 | Driver's live position | After pickup only | Never | Own | — |
 | Delivery code | Yes | Never | Never (the customer reads it out) | Never |
 
@@ -226,9 +321,12 @@ Measured on a laptop, with the app, database and load tool on one machine, so tr
 
 | Request | Clients at once | Requests per second | 95% answered within |
 |---|---|---|---|
-| Home feed | 50 | 800 | 130 ms |
-| Search | 50 | 1,900 | 56 ms |
-| Change-shop list | 200 | 10,500 | 52 ms |
+| Home feed (with ratings) | 50 | 1,400 | 67 ms |
+| Home feed (with ratings) | 200 | 1,380 | 279 ms |
+| Search | 50 | 3,300 | 28 ms |
+| Change-shop list | 200 | 12,100 | 50 ms |
+| Price quote (with surge check) | 50 | 6,800 | 13 ms |
+| Admin metrics, 30 days | 20 | 9,700 | 5 ms |
 | Driver location ping | 100 | 12,400 | 15 ms |
 | Driver job list | 400 | 11,000 | 53 ms |
 | Customer tracking | 200 | 15,600 | 33 ms |
@@ -291,7 +389,7 @@ POST /api/auth/signup
 |---|---|---|
 | `GET` | `/api/shops/me` | My shop. `404` until it is created. |
 | `PUT` | `/api/shops/me` | Create or update my shop. New shops start as `PENDING`. Opening hours are set by admin. |
-| `GET` | `/api/shops/me/products` | My products with price and stock. |
+| `GET` | `/api/shops/me/products` | My products: my price (`priceCents`), what I'm paid per unit (`payoutCents`), and stock. |
 | `POST` | `/api/shops/me/products` | Add a catalog product with my price and starting stock. |
 | `PUT` | `/api/shops/me/products/{id}` | Change my price. |
 | `POST` | `/api/shops/me/products/{id}/stock` | Change stock: `+n` when stock arrives, `-n` to correct. |
@@ -319,25 +417,26 @@ POST /api/shops/me/orders/7/accept       { "unavailableItemIds": [12] }
 - `province` is a two-letter code (`BC`, `ON`, ...). `postalCode` is a Canadian code like `V3T 1A1`.
 - `latitude` and `longitude` come from the map pin in the shop's sign-up form.
 - The shop's `timeZone` is set from its province, and `hours` (read-only here) are what admin set.
-- A shop never sees the customer's name, address or the customer price. Its order view shows its own prices, `payoutCents`, and `cancelReason` if admin cancelled.
+- A shop never sees the customer's name, address or the customer price. Its order view shows its payout per unit (`unitPriceCents`), `payoutCents`, and `cancelReason` if admin cancelled.
 - Orders the shop doesn't answer within 10 minutes expire, and their stock comes back.
 
 ### Admin (role `ADMIN`)
 
 | Method | Path | What it does |
 |---|---|---|
-| `GET` | `/api/admin/stats` | Dashboard: orders waiting for a shop, needing a driver, on the road, placed and delivered in 24 h; shops, drivers and product requests pending; drivers online. |
+| `GET` | `/api/admin/stats` | Dashboard: orders waiting for a shop, needing a driver, on the road, placed and delivered in 24 h; shops, drivers and product requests pending; drivers online; open driver alerts. |
+| `GET` | `/api/admin/metrics?from=&to=` | One row per day (default: last 30 days, at most 366) plus totals, for charts. |
 | `GET` | `/api/admin/shops?status=PENDING` | Shops waiting for approval (or any status, or all). |
 | `GET` | `/api/admin/shops/{id}` | One shop, with its real location and hours. |
 | `PUT` | `/api/admin/shops/{id}/status` | `APPROVED`, `SUSPENDED` or `PENDING`. |
 | `PUT` | `/api/admin/shops/{id}/hours` | Replace the shop's opening hours for the whole week. |
 | `GET` | `/api/admin/orders` | Every order, newest first. Filters: `status`, `shopId`, `customerId`, `driverId`, `needsDriver=true`. |
-| `GET` | `/api/admin/orders/{id}` | One order with everything: both prices, payout, driver pay, all three parties. |
+| `GET` | `/api/admin/orders/{id}` | One order with everything: both prices, every fee, tip, shop payout, item margin, driver pay, net, all three parties. |
 | `POST` | `/api/admin/orders/{id}/cancel` | Cancel any unfinished order, with a reason. |
 | `POST` | `/api/admin/orders/{orderId}/assign` | Give an order waiting for pickup to an approved driver (replaces any driver it had). |
 | `POST` | `/api/admin/orders/{orderId}/unassign` | Take it off its driver before pickup; it goes back to the job list. |
-| `GET` | `/api/admin/settings` | Default markup, delivery fee, driver pay, and per-category markups. |
-| `PUT` | `/api/admin/settings` | Change the default markup, delivery fee and driver pay. |
+| `GET` | `/api/admin/settings` | Every setting (see [What admin can change](#what-admin-can-change)) and the per-category markups. |
+| `PUT` | `/api/admin/settings` | Change any settings. Send only the fields to change. |
 | `PUT` | `/api/admin/settings/markups/{category}` | Set a markup for one category. |
 | `DELETE` | `/api/admin/settings/markups/{category}` | That category goes back to the default markup. |
 | `GET` | `/api/admin/users?role=&q=` | Accounts, searched by email or name. |
@@ -347,6 +446,13 @@ POST /api/shops/me/orders/7/accept       { "unavailableItemIds": [12] }
 | `PUT` | `/api/admin/catalog/{id}` | Edit a product. Approve or reject a request by changing `status`. |
 | `GET` | `/api/admin/drivers?status=PENDING` | Drivers by status. |
 | `PUT` | `/api/admin/drivers/{userId}/status` | `APPROVED` or `SUSPENDED`. Suspending takes the driver offline at once. |
+| `GET` | `/api/admin/drivers/{userId}/violations` | A driver's violation counts and list. |
+| `GET` | `/api/admin/driver-alerts?open=true` | Daily warnings, ban reviews and "not received" reports, newest first. |
+| `POST` | `/api/admin/driver-alerts/{id}/resolve` | `DISMISS`, or `SUSPEND` the driver. |
+| `GET` | `/api/admin/payouts?periodStart=` | Every driver's pay for a two-week period (default: the last finished one). |
+| `POST` | `/api/admin/payouts/{driverId}/{periodStart}/paid` | Record that a driver was paid for a finished period. |
+| `GET` | `/api/admin/reviews?subjectType=&subjectId=` | Reviews of a `SHOP`, `PRODUCT`, `DRIVER` or `CUSTOMER`, with the average. |
+| `DELETE` | `/api/admin/reviews/{id}` | Remove a review; the average updates. |
 
 ```json
 PUT  /api/admin/shops/1/status       { "status": "APPROVED" }
@@ -357,10 +463,12 @@ POST /api/admin/catalog              { "name": "Maple Syrup 1L", "brand": "Kirkl
 ```json
 PUT  /api/admin/shops/1/hours        { "hours": [ { "dayOfWeek": "MONDAY", "opens": "08:00", "closes": "22:00" },
                                                   { "dayOfWeek": "SATURDAY", "opens": "00:00", "closes": "23:59:59" } ] }
-PUT  /api/admin/settings             { "defaultMarkupPercent": 150, "deliveryFeeCents": 499, "driverPayCents": 499 }
+PUT  /api/admin/settings             { "shopCutPercent": 15, "deliveryFeeLowCents": 599, "surgeMode": "AUTO",
+                                       "lateNightStart": "23:00", "lateNightEnd": "06:00", "tipOptionsCents": [100, 200, 500, 1000] }
 PUT  /api/admin/settings/markups/Dairy   { "markupPercent": 130 }
 POST /api/admin/orders/7/cancel      { "reason": "Customer asked by phone" }
 POST /api/admin/orders/7/assign      { "driverId": 12 }
+POST /api/admin/driver-alerts/3/resolve  { "action": "SUSPEND" }
 PUT  /api/admin/users/9/disabled     { "disabled": true }
 ```
 
@@ -405,11 +513,16 @@ GET /api/browse/products?lat=49.2&lng=-122.86&q=maple
 
 | Method | Path | What it does |
 |---|---|---|
+| `POST` | `/api/orders/quote` | What a cart would cost now: every fee, the total, and how much more for free delivery. Places nothing. |
 | `POST` | `/api/orders` | Place an order. `201` new, `200` if the same `idempotencyKey` was already used. |
 | `GET` | `/api/orders` | My orders, newest first. |
 | `GET` | `/api/orders/{id}` | One order, including the `deliveryCode`. |
 | `POST` | `/api/orders/{id}/cancel` | Cancel while the shop has not answered. |
 | `GET` | `/api/orders/{id}/tracking` | Order status and, after pickup, the driver's position and minutes away. |
+| `POST` | `/api/orders/{id}/tip` | Add a tip after checkout (once, up to 24 h after delivery). |
+| `POST` | `/api/orders/{id}/receipt` | Answer "Did you receive your order?" (`{"received": true}`), or report it missing within 24 h. |
+| `POST` | `/api/orders/{id}/reviews` | Rate the shop, rider and products after delivery. |
+| `GET` | `/api/orders/{id}/reviews` | What I wrote for this order (empty = not reviewed yet). |
 
 ```json
 POST /api/orders
@@ -418,7 +531,10 @@ POST /api/orders
   "items": [ { "shopProductId": 1, "quantity": 2 } ],
   "address": { "addressLine": "77 Customer Rd", "city": "Surrey", "province": "BC", "postalCode": "V3T 2B2",
                "latitude": 49.2, "longitude": -122.86 },
-  "note": "Ring the bell" }
+  "note": "Ring the bell", "tipCents": 200 }
+
+POST /api/orders/7/reviews
+{ "shopStars": 5, "driverStars": 4, "products": [ { "productId": 1, "stars": 5 } ], "comment": "Quick!" }
 ```
 
 - One cart = one shop for now. Up to 50 lines, 1 to 99 of each.
@@ -428,7 +544,8 @@ POST /api/orders
 - `409` "This shop is closed right now" if the shop closed since the customer browsed.
 - If admin cancels, the order shows `status: CANCELLED` with a `cancelReason`.
 - `driverName` is the rider's name once one has taken the job (`null` before). Shops never get it: the rider tells the shop the order number at the counter.
-- Totals: `subtotalCents` + `deliveryFeeCents` = `totalCents`. Items the shop marked unavailable are not counted.
+- Totals: `subtotalCents` + `deliveryFeeCents` + `handlingFeeCents` + `smallCartFeeCents` + `lateNightFeeCents` + `surgeFeeCents` + `tipCents` = `totalCents`. Items the shop marked unavailable are not counted.
+- `receiptStatus` is `ASKED` when the app should show "Did you receive your order?".
 
 Tracking, while the order is on the way:
 
@@ -447,7 +564,7 @@ GET /api/orders/7/tracking
 | `GET` | `/api/drivers/me` | My driver profile. |
 | `PUT` | `/api/drivers/me` | Create or update my profile. New drivers start as `PENDING`. |
 | `POST` | `/api/drivers/me/online` | Start a shift, with my current position. Approved drivers only. |
-| `POST` | `/api/drivers/me/offline` | End the shift. |
+| `POST` | `/api/drivers/me/offline` | End the shift. Not while holding an order. |
 | `POST` | `/api/drivers/me/location` | Location ping, every few seconds while online. `409` = not online, stop pinging. |
 | `GET` | `/api/drivers/me/jobs` | Open jobs whose shop is within 8 km of me, oldest first. |
 | `POST` | `/api/drivers/me/jobs/{orderId}/accept` | Take a job. `409` if another driver was faster. |
@@ -455,9 +572,12 @@ GET /api/orders/7/tracking
 | `POST` | `/api/drivers/me/delivery/release` | Give the job back before pickup. |
 | `POST` | `/api/drivers/me/delivery/picked-up` | Collected from the shop (after the shop marks it ready). |
 | `POST` | `/api/drivers/me/delivery/delivered` | Delivered, with the customer's code. |
-| `GET` | `/api/drivers/me/deliveries` | My finished deliveries and pay. |
+| `GET` | `/api/drivers/me/deliveries` | My finished deliveries, with pay and tip. |
+| `GET` | `/api/drivers/me/pay-statements?count=6` | Two-week pay statements, the current one first. |
+| `GET` | `/api/drivers/me/violations` | My violations today and in 30 days, against the limits. |
+| `POST` | `/api/drivers/me/deliveries/{orderId}/reviews` | Rate the shop and the customer of a delivery. |
 
-`payCents` everywhere is the driver pay admin set when the order was placed.
+`payCents` on the job list and the current delivery is an estimate (hourly rate and per-km allowance for the distances). After delivery it is the actual pay for the engaged time, and `tipCents` appears.
 
 ```json
 PUT  /api/drivers/me                     { "phone": "+1 604 555 0142" }
@@ -646,18 +766,19 @@ Set these as environment variables. Everything else lives in [`application.prope
 | `DB_POOL_SIZE` | `10` | Database connections |
 | `DRIVER_MAX_PINGS_PER_MINUTE` | `60` | Location pings per driver per minute |
 | `API_DOCS_ENABLED` | `true` | Set to `false` to hide Swagger UI in production |
+| `BUSINESS_TIME_ZONE` | `America/Vancouver` | Decides "today" for daily violation limits and charts, and when pay periods start |
 
 The web app has one setting, `VITE_API_URL`: the backend's address, given at build time (see [Build the web app](#build-the-web-app)).
 
 Fixed in `application.properties`: shop answer time 10 minutes, driver job radius 8 km, ETA of 10 minutes prep + 3 minutes per km, tokens valid 12 hours.
 
-Markup, delivery fee, driver pay and opening hours are not configuration: admin sets them through the API, and they live in the database (the first values are 1.5x, $4.99 and $4.99).
+Prices, fees, driver pay, violation limits and opening hours are not configuration: admin sets them through the API, and they live in the database. Their starting values are in [Prices](#prices), [Order fees](#order-fees), [Driver pay](#driver-pay) and [Driver rules](#driver-rules).
 
 ---
 
 ## Tests
 
-`mvn test` (in `backend`) runs 87 tests against a real Postgres, over real HTTP, the same way the web app calls the API. The web app itself has no automated tests yet.
+`mvn test` (in `backend`) runs 102 tests against a real Postgres, over real HTTP, the same way the web app calls the API. The web app itself has no automated tests yet.
 
 | Test | What it checks |
 |---|---|
@@ -665,6 +786,9 @@ Markup, delivery fee, driver pay and opening hours are not configuration: admin 
 | `OrderTest` | Placing, pricing, every order step, who can see what |
 | `BrowseTest` | Feed, change shop, search in a shop, shop location privacy |
 | `DriverTest` | Driver approval, job list, pickup, delivery code, tracking |
+| `FeesTest` | Delivery tiers, handling, small-cart, late-night and surge fees, the quote, tips |
+| `DriverWorkTest` | Engaged-time pay, pay statements and payouts, violations, admin alerts, "Did you receive it?", metrics |
+| `ReviewTest` | Reviews from customers and riders, averages in browsing, admin removal |
 | `AdminTest` | Prices and fees, opening hours, order board, cancel, assigning drivers, suspending accounts, dashboard, health check |
 | `SecurityTest` | Forged tokens, SQL injection, oversized bodies, error leaks |
 | `ConcurrencyTest`, `OrderConcurrencyTest`, `DriverConcurrencyTest`, `AdminConcurrencyTest` | Many requests at the same moment: stock never oversold, one winner per race, no deadlocks, admin actions racing shops and drivers |
