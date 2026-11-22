@@ -1,12 +1,16 @@
-# Quick Ecommerce Canada — Backend
+# QuikE — Quick Ecommerce Canada
 
 A delivery platform for small local shops in Canada. Shops list what they have in stock. Customers nearby order it from an app. A driver picks the order up and brings it to the door.
 
-This repository is the **backend**: one Spring Boot app and one Postgres database that every screen talks to.
+This repository holds the whole platform:
+
+- **`backend/`**: one Spring Boot app and one Postgres database that every screen talks to.
+- **`frontend/`**: one React web app with the screens for all four roles (customer, shop, rider, admin). It has its own [README](frontend/README.md).
 
 - [What the project is](#what-the-project-is)
 - [Project status](#project-status): what is done and what is left
 - [How it is put together](#how-it-is-put-together)
+- [The web app](#the-web-app)
 - [How it works](#how-it-works)
 - [Endpoints](#endpoints)
 - [How to start the project](#how-to-start-the-project)
@@ -33,7 +37,7 @@ The platform adds its markup on top of the shop's price (1.5x by default, set by
 
 ## Project status
 
-The backend is complete for running the platform and ready to deploy. Three features wait on outside decisions (payments, sales tax, password reset). The four frontends are separate and not in this repository; they call the endpoints below.
+The backend and the web app are built for all four roles, and a full order has been run through the app end to end. Both are ready to deploy. Three features wait on outside decisions (payments, sales tax, password reset), and two things need doing before a public launch (see [Before launch](#left)).
 
 ### Done
 
@@ -48,8 +52,16 @@ The backend is complete for running the platform and ready to deploy. Three feat
 | Customer tracking | Driver's live position on the map, after pickup only |
 | Admin | Dashboard, order board, cancel, assign drivers by hand, markup per category, delivery fee, driver pay |
 | Production basics | Health check, rate limits, overload protection, security tests, race tests, load tests |
+| Web app (`frontend/`) | Landing page; customer shopping, checkout, orders and live tracking; shop orders, products and profile; rider jobs, pickup and delivery; full admin console. Sign-up for riders and shop owners with a "pending review" screen until approved |
 
 ### Left
+
+**Before launch**
+
+| Item | Why |
+|---|---|
+| Map tiles from a paid provider (MapTiler, Stadia or Mapbox; all have free tiers) | The web app loads maps straight from OpenStreetMap's free servers, whose rules don't allow production apps |
+| Show the delivery fee at checkout | The backend has no endpoint that gives customers the fee, so checkout says "added when you order" |
 
 **Waiting on a decision**
 
@@ -70,32 +82,37 @@ The backend is complete for running the platform and ready to deploy. Three feat
 - **Refresh tokens.** Logins last 12 hours.
 - **Multi-shop carts.** One order goes to one shop.
 
-**Outside this repository**
+**Next steps**
 
 | Step | Status |
 |---|---|
 | Deployment | Ready: pick a host, then follow [Deploying](#deploying) |
-| Shop website and admin screens (Next.js) | Not in this repository |
-| Customer app and driver app (Expo) | Not in this repository |
-| Pilot with 3 to 5 shops, then app store release | After deployment and the apps |
+| Pilot with 3 to 5 shops and your own riders | After deployment |
+| Phone apps in the App Store and Google Play | Not built. Customers and riders use the web app in their phone's browser for now |
 
 ---
 
 ## How it is put together
 
 ```
-Shop website + admin (Next.js) ─┐
-Customer app (Expo) ────────────┼──►  Spring Boot backend  ──►  Postgres
-Driver app (Expo) ──────────────┘     (this repository)
+Web app (frontend/)                       Spring Boot backend (backend/)
+customer · shop · rider · admin  ──────►  REST API + rules  ──────►  Postgres
+React, in any browser or phone            the only thing that touches the database
 ```
 
-**Tech:** Java 21, Spring Boot 4.1, Spring Security (JWT), Spring Data JPA, Flyway, Postgres 17, springdoc-openapi.
+**Backend:** Java 21, Spring Boot 4.1, Spring Security (JWT), Spring Data JPA, Flyway, Postgres 17, springdoc-openapi.
+
+**Web app:** React 19, Vite, React Router, TanStack Query, Tailwind CSS, Leaflet maps. Details in [frontend/README.md](frontend/README.md).
 
 **Why one app and one database:** the backend is the only thing that touches the database. Every shop's data lives in the same tables, marked with a `shop_id`. There is no copy step, so a stock change shows to customers immediately.
 
 ### Folder layout
 
 ```
+frontend/                       the web app (see frontend/README.md)
+  src/pages/                    customer/, shop/, driver/, admin/ screens
+  src/lib/api.js                every backend call goes through here
+  scripts/seed.mjs              fills a local backend with demo shops, products and logins
 backend/
   pom.xml
   src/main/java/com/quickcommerce/
@@ -116,6 +133,24 @@ backend/
 ```
 
 Each part keeps its own tables. Other parts reach it only through its service class (for example, orders take stock through `StockService`, never by writing to the stock table).
+
+---
+
+## The web app
+
+One React app serves everyone; each area is locked to one role after login.
+
+| Who | What they get |
+|---|---|
+| Guest | Landing page; any product click goes to sign in |
+| Customer | Product feed by aisle, search, "change shop", one shop's aisle, cart, checkout with a map pin, orders with live rider tracking and the delivery code |
+| Shop owner | Sign-up, then "pending review" until admin approves. Orders inbox (new, packing, ready, out for delivery), products and stock, profile |
+| Rider | Sign-up, then "pending review". One phone-sized page: go online, job list, pickup card, delivery card with the code box, earnings |
+| Admin | Dashboard, orders (cancel, assign rider), shops (approve, hours), catalog, riders, users, prices and fees |
+
+The app follows the same privacy rules as the backend (see [Who sees what](#who-sees-what)). At the shop counter, the rider says the order number, and the shop hands that order over.
+
+The full page-by-endpoint map and a step-by-step test order are in [frontend/README.md](frontend/README.md). The web app has no automated tests yet; that walkthrough is how it is checked.
 
 ---
 
@@ -449,10 +484,11 @@ The driver never sees which products are in the bag, only how many units. Turn-b
 
 - **Java 21** (`java -version`)
 - **Maven 3.9+** (`mvn -version`)
+- **Node.js 22** (`node -v`), for the web app only
 
 That's all for development. Tests and the local run download a real Postgres 17 on first use. No Docker or Postgres install is needed.
 
-All commands below run from the `backend` folder.
+The backend commands below run from the `backend` folder; the web app's from `frontend`.
 
 ```bash
 cd backend
@@ -475,7 +511,33 @@ mvn spring-boot:test-run
 - The API runs on <http://localhost:8080>; open <http://localhost:8080/swagger-ui.html> to try every endpoint in the browser.
 - It uses a throwaway database: all data is lost when you stop the app.
 - An admin account is created for you. Its email and password are in [`src/test/resources/application-dev.properties`](backend/src/test/resources/application-dev.properties).
-- The frontend at `http://localhost:3000` is allowed to call it.
+- The web app (next section) reaches it through its own dev server, so no CORS setting is needed locally.
+
+### Run the web app
+
+With the backend running, in a second terminal:
+
+```bash
+cd frontend
+```
+
+```bash
+npm install
+```
+
+```bash
+npm run seed
+```
+
+```bash
+npm run dev
+```
+
+- Open <http://localhost:5173>.
+- `npm run seed` creates 3 open shops in Surrey, BC, 30 products, and demo customer, shop owner, rider and admin logins. Run it after every backend restart, because the local database starts empty.
+- On the login page, open **Dev only: demo accounts** for one-click logins. These buttons do not exist in the production build.
+- Customers only see shops within 5 km, so the demo works around the default pin in Surrey. To test elsewhere: `npm run seed -- --near <latitude>,<longitude>`.
+- To try a whole order as each role in turn, follow "Test one order end to end" in [frontend/README.md](frontend/README.md).
 
 ### Try it from the terminal
 
@@ -504,17 +566,21 @@ curl -s localhost:8080/api/shops/me -H "Authorization: Bearer $SHOP"
 
 ## Deploying
 
-The app is one jar plus one Postgres 17 database. Any host that runs Java 21 works. Flyway creates and updates the tables when the app starts, so there is no separate database step.
+There are two parts to deploy:
+
+- **Backend:** one jar plus one Postgres 17 database. Any host that runs Java 21 works. Flyway creates and updates the tables when the app starts, so there is no separate database step.
+- **Web app:** plain static files (HTML, JavaScript, images), so any static host works, for example S3 with CloudFront, Render static sites, Netlify or Cloudflare Pages.
 
 ### Checklist
 
 1. **Database:** a managed Postgres 17, with daily backups switched on.
 2. **Secrets:** set `DATABASE_URL`, `DATABASE_USER`, `DATABASE_PASSWORD`, a fresh random `JWT_SECRET` (at least 32 characters), and `ADMIN_EMAIL` and `ADMIN_PASSWORD` for the first admin.
 3. **HTTPS:** put the app behind the host's proxy or load balancer, and set `FORWARD_HEADERS_STRATEGY=native`.
-4. **Frontends:** set `CORS_ALLOWED_ORIGINS` to the shop and admin website's address.
+4. **Web app address:** set `CORS_ALLOWED_ORIGINS` on the backend to the web app's address (for example `https://app.yourdomain.ca`).
 5. **Health check:** point the host at `GET /actuator/health`. It answers `{"status":"UP"}` without a login when the app and its database are working, and gives no other details. No other actuator endpoint is exposed.
 6. **API docs:** set `API_DOCS_ENABLED=false` if the Swagger page should not be public.
 7. **After the first start:** log in as admin, set the price settings if 1.5x, $4.99 and $4.99 are not right, then approve shops and set their opening hours.
+8. **Web app:** build it with the backend's address, then upload the `frontend/dist` folder to the static host (commands below). Switch the maps to a paid tile provider before a public launch.
 
 ### Run the jar
 
@@ -540,6 +606,24 @@ The app refuses to start without `JWT_SECRET` (at least 32 characters), so it ca
 
 **Behind a load balancer or proxy**, `FORWARD_HEADERS_STRATEGY=native` is required. Without it every user appears to come from the proxy's IP, and the per-IP login limit would block everyone.
 
+### Build the web app
+
+From the repository's top folder:
+
+```bash
+cd frontend
+```
+
+```bash
+npm ci
+```
+
+```bash
+VITE_API_URL=https://api.yourdomain.ca npm run build
+```
+
+The finished site is in `frontend/dist`. `VITE_API_URL` is read at build time, so rebuild whenever the backend's address changes. If the web app and the API are served from the same address (the host sends `/api` to the backend), leave `VITE_API_URL` out.
+
 **More than one server:** the login limits and the suspended-account list are kept in each server's memory. With two servers each one counts on its own, and a suspension reaches the other server within 30 seconds.
 
 ---
@@ -563,6 +647,8 @@ Set these as environment variables. Everything else lives in [`application.prope
 | `DRIVER_MAX_PINGS_PER_MINUTE` | `60` | Location pings per driver per minute |
 | `API_DOCS_ENABLED` | `true` | Set to `false` to hide Swagger UI in production |
 
+The web app has one setting, `VITE_API_URL`: the backend's address, given at build time (see [Build the web app](#build-the-web-app)).
+
 Fixed in `application.properties`: shop answer time 10 minutes, driver job radius 8 km, ETA of 10 minutes prep + 3 minutes per km, tokens valid 12 hours.
 
 Markup, delivery fee, driver pay and opening hours are not configuration: admin sets them through the API, and they live in the database (the first values are 1.5x, $4.99 and $4.99).
@@ -571,7 +657,7 @@ Markup, delivery fee, driver pay and opening hours are not configuration: admin 
 
 ## Tests
 
-`mvn test` runs 87 tests against a real Postgres, over real HTTP, the same way the apps call the API.
+`mvn test` (in `backend`) runs 87 tests against a real Postgres, over real HTTP, the same way the web app calls the API. The web app itself has no automated tests yet.
 
 | Test | What it checks |
 |---|---|
