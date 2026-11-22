@@ -21,7 +21,7 @@ This repository is the **backend**: one Spring Boot app and one Postgres databas
 In smaller Canadian towns, many people run their own private shops. They buy stock cheaply (Costco and similar) and sell it at a markup. This platform puts those shops online, the way Blinkit or Swiggy Instamart do:
 
 - **Shops** sign up on a website, list their products, and keep stock up to date.
-- **Customers** open the app, see products from shops within 10 km, and order.
+- **Customers** open the app, see products from shops within 5 km, and order.
 - **Drivers** pick up the order from the shop and deliver it.
 - **Admin** (us) approves shops and drivers, and owns the shared product list.
 
@@ -343,7 +343,7 @@ PUT  /api/admin/users/9/disabled     { "disabled": true }
 
 ### Browsing (role `CUSTOMER`)
 
-Every browse call takes the customer's delivery point as `lat` and `lng`. Only approved shops that are open right now and within 10 km, approved products, and items in stock are shown.
+Every browse call takes the customer's delivery point as `lat` and `lng`. Only approved shops that are open right now and within the delivery range (5 km), approved products, and items in stock are shown.
 
 | Method | Path | What it does |
 |---|---|---|
@@ -392,6 +392,7 @@ POST /api/orders
 - A customer can have at most 3 orders waiting for a shop's answer.
 - `409` "This shop is closed right now" if the shop closed since the customer browsed.
 - If admin cancels, the order shows `status: CANCELLED` with a `cancelReason`.
+- `driverName` is the rider's name once one has taken the job (`null` before). Shops never get it: the rider tells the shop the order number at the counter.
 - Totals: `subtotalCents` + `deliveryFeeCents` = `totalCents`. Items the shop marked unavailable are not counted.
 
 Tracking, while the order is on the way:
@@ -554,6 +555,7 @@ Set these as environment variables. Everything else lives in [`application.prope
 | `DATABASE_PASSWORD` | empty | Postgres password |
 | `JWT_SECRET` | **required** | Signs login tokens. At least 32 characters. |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | empty | If both are set, this admin is created at startup |
+| `MAX_DELIVERY_KM` | `5` | How far (straight line) a customer can be from a shop to see and order from it |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:3000` | Websites allowed to call the API, comma-separated |
 | `FORWARD_HEADERS_STRATEGY` | `none` | Set to `native` behind a proxy |
 | `AUTH_IP_LIMIT_PER_MINUTE` | `60` | Signups and logins per IP per minute |
@@ -561,7 +563,7 @@ Set these as environment variables. Everything else lives in [`application.prope
 | `DRIVER_MAX_PINGS_PER_MINUTE` | `60` | Location pings per driver per minute |
 | `API_DOCS_ENABLED` | `true` | Set to `false` to hide Swagger UI in production |
 
-Fixed in `application.properties`: delivery range 10 km, shop answer time 10 minutes, driver job radius 8 km, ETA of 10 minutes prep + 3 minutes per km, tokens valid 12 hours.
+Fixed in `application.properties`: shop answer time 10 minutes, driver job radius 8 km, ETA of 10 minutes prep + 3 minutes per km, tokens valid 12 hours.
 
 Markup, delivery fee, driver pay and opening hours are not configuration: admin sets them through the API, and they live in the database (the first values are 1.5x, $4.99 and $4.99).
 

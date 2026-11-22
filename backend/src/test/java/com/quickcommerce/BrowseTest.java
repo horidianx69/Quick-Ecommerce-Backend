@@ -18,7 +18,7 @@ import org.junit.jupiter.api.Test;
  */
 class BrowseTest extends ApiTestBase {
 
-    /** Real distances from HERE: NEAR about 1.3 km, MID about 4.4 km, FAR about 33 km (outside the 10 km range). */
+    /** Real distances from HERE: NEAR about 1.3 km, MID about 4.4 km, FAR about 33 km (outside the 5 km range). */
     static final double[] NEAR = {49.19, -122.85};
     static final double[] MID = {49.24, -122.86};
     static final double[] FAR = {49.50, -122.86};
@@ -209,7 +209,8 @@ class BrowseTest extends ApiTestBase {
 
         // The shifted point stays put when the owner saves again without moving,
         // so it cannot be averaged out by watching it change.
-        List<String> probes = List.of("lat=49.2&lng=-122.86", "lat=49.17&lng=-122.9", "lat=49.23&lng=-122.8");
+        // All about 1 to 3 km from the shop, so they stay inside the 5 km delivery range.
+        List<String> probes = List.of("lat=49.2&lng=-122.86", "lat=49.17&lng=-122.88", "lat=49.21&lng=-122.82");
         List<Double> before = probes.stream().map(p -> get("/api/browse/products?" + p + "&q=" + tag, customer)
                 .<Number>read("$.content[0].offer.distanceKm").doubleValue()).toList();
         for (int i = 0; i < 5; i++) {

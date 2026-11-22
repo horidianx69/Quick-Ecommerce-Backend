@@ -20,6 +20,7 @@ import java.time.Duration;
 import java.time.Instant;
 import jakarta.persistence.criteria.Predicate;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -479,7 +480,9 @@ public class OrderService {
         Page<Order> found = orders.findByCustomerId(customerId, newestFirst(page, size));
         Map<Long, List<OrderItem>> lines = linesOf(found.getContent());
         Map<Long, String> shopNames = shops.names(found.stream().map(Order::getShopId).collect(Collectors.toSet()));
-        return found.map(o -> OrderViews.customer(o, shopNames.get(o.getShopId()), lines.getOrDefault(o.getId(), List.of())));
+        Map<Long, String> riders = driverNames(found.getContent());
+        return found.map(o -> OrderViews.customer(o, shopNames.get(o.getShopId()), lines.getOrDefault(o.getId(), List.of()),
+                riders.get(o.getDriverId())));
     }
 
     @Transactional(readOnly = true)
@@ -517,11 +520,20 @@ public class OrderService {
 
     private CustomerOrderView customerView(Order order) {
         String shopName = shops.names(List.of(order.getShopId())).get(order.getShopId());
-        return OrderViews.customer(order, shopName, linesOf(List.of(order)).getOrDefault(order.getId(), List.of()));
+        return OrderViews.customer(order, shopName, linesOf(List.of(order)).getOrDefault(order.getId(), List.of()),
+                driverNames(List.of(order)).get(order.getDriverId()));
     }
 
     private ShopOrderView shopView(Order order) {
         return OrderViews.shop(order, linesOf(List.of(order)).getOrDefault(order.getId(), List.of()));
+    }
+
+    /** Names of the riders on these orders, in one query. A HashMap, so orders with no rider (null id) just get null. */
+    private Map<Long, String> driverNames(List<Order> list) {
+        Set<Long> ids = list.stream().map(Order::getDriverId).filter(id -> id != null).collect(Collectors.toSet());
+        Map<Long, String> names = new HashMap<>();
+        if (!ids.isEmpty()) users.findAllById(ids).forEach(u -> names.put(u.getId(), u.getName()));
+        return names;
     }
 
     /** All lines of the given orders in one query, grouped by order id. */
