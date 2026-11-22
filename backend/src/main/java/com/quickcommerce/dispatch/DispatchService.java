@@ -77,7 +77,7 @@ public class DispatchService {
             return List.of();
         }
         return queries.openJobsNear(driver.getLatitude(), driver.getLongitude(), offerRadiusKm).stream()
-                .map(job -> new JobView(job.orderId(), Status.valueOf(job.status()), job.units(), pay(job.deliveryFeeCents()),
+                .map(job -> new JobView(job.orderId(), Status.valueOf(job.status()), job.units(), job.driverPayCents(),
                         round(job.pickupKm()), round(job.dropKm()), job.city(), job.createdAt()))
                 .toList();
     }
@@ -125,7 +125,7 @@ public class DispatchService {
     @Transactional(readOnly = true)
     public Page<PastDelivery> history(Long driverId, int page, int size) {
         return orders.deliveredBy(driverId, page, size).map(order -> new PastDelivery(order.getId(),
-                orders.unitCount(order.getId()), pay(order.getDeliveryFeeCents()), order.getDeliveredAt()));
+                orders.unitCount(order.getId()), order.getDriverPayCents(), order.getDeliveredAt()));
     }
 
     private Driver requireWorking(Long driverId) {
@@ -153,14 +153,8 @@ public class DispatchService {
                 order.getLatitude(), order.getLongitude());
         double dropKm = Geo.distanceKm(shop.getLatitude(), shop.getLongitude(), order.getLatitude(), order.getLongitude());
         return new DeliveryView(order.getId(), order.getStatus(), orders.unitCount(order.getId()),
-                pay(order.getDeliveryFeeCents()), pickup, dropoff, order.getCity(), round(dropKm),
+                order.getDriverPayCents(), pickup, dropoff, order.getCity(), round(dropKm),
                 carrying ? order.getNote() : null, order.getCreatedAt());
-    }
-
-    // ponytail: the driver is paid the order's delivery fee, in full. A placeholder
-    // until the real pay rule (base + distance, tips, platform share) is decided.
-    private static int pay(int deliveryFeeCents) {
-        return deliveryFeeCents;
     }
 
     private static double round(double km) {

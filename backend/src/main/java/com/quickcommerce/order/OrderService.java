@@ -1,11 +1,14 @@
 package com.quickcommerce.order;
 
 import com.quickcommerce.auth.Throttle;
+import com.quickcommerce.auth.User;
+import com.quickcommerce.auth.UserRepository;
 import com.quickcommerce.catalog.ShopProductView;
 import com.quickcommerce.catalog.StockService;
 import com.quickcommerce.common.Geo;
 import com.quickcommerce.common.Paging;
 import com.quickcommerce.order.Order.Status;
+import com.quickcommerce.order.OrderViews.AdminOrderView;
 import com.quickcommerce.order.OrderViews.CustomerOrderView;
 import com.quickcommerce.order.OrderViews.ShopOrderView;
 import com.quickcommerce.shop.Shop;
@@ -15,7 +18,9 @@ import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
+import jakarta.persistence.criteria.Predicate;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -23,8 +28,10 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -50,6 +57,8 @@ public class OrderService {
     /** A driver can take an order from the moment the shop accepts it, and travel while it is packed. */
     static final List<Status> WAITING_FOR_PICKUP = List.of(Status.ACCEPTED, Status.READY);
     static final List<Status> WITH_A_DRIVER = List.of(Status.ACCEPTED, Status.READY, Status.PICKED_UP);
+    /** Not finished yet: admin can still cancel these. */
+    static final List<Status> ACTIVE = List.of(Status.PLACED, Status.ACCEPTED, Status.READY, Status.PICKED_UP);
     static final int DELIVERY_CODE_TRIES = 5;
 
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -59,14 +68,13 @@ public class OrderService {
     private final StockService stock;
     private final ShopService shops;
     private final Pricing pricing;
-    private final int deliveryFeeCents;
     private final double maxDistanceKm;
     private final Duration acceptTimeout;
     private final Throttle throttle;
+    private final UserRepository users;
 
     OrderService(OrderRepository orders, OrderItemRepository items, StockService stock, ShopService shops,
-            Pricing pricing, Throttle throttle,
-            @Value("${app.orders.delivery-fee-cents}") int deliveryFeeCents,
+            Pricing pricing, Throttle throttle, UserRepository users,
             @Value("${app.orders.max-distance-km}") double maxDistanceKm,
             @Value("${app.orders.accept-timeout}") Duration acceptTimeout) {
         this.orders = orders;
@@ -75,7 +83,7 @@ public class OrderService {
         this.shops = shops;
         this.pricing = pricing;
         this.throttle = throttle;
-        this.deliveryFeeCents = deliveryFeeCents;
+        this.users = users;
         this.maxDistanceKm = maxDistanceKm;
         this.acceptTimeout = acceptTimeout;
     }
@@ -101,6 +109,9 @@ public class OrderService {
                     "You have orders waiting for a shop to answer. Try again once they are answered.");
         }
         Shop shop = shops.requireApproved(shopId);
+        if (!shops.isOpenNow(shopId)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "This shop is closed right now");
+        }
         // Measured from the shop's public point, the same one browsing uses, so the
         // range check tells a customer nothing more about where the shop really is.
         if (Geo.distanceKm(shop.getPublicLatitude(), shop.getPublicLongitude(), address.latitude(), address.longitude())
@@ -109,6 +120,7 @@ public class OrderService {
         }
 
         List<ShopProductView> reserved = stock.reserve(shopId, quantities);
+        Pricing.Prices prices = pricing.current();
 
         Order order = new Order();
         order.setCustomerId(customerId);
@@ -122,7 +134,8 @@ public class OrderService {
         order.setLatitude(address.latitude());
         order.setLongitude(address.longitude());
         order.setNote(note == null || note.isBlank() ? null : note.trim());
-        order.setDeliveryFeeCents(deliveryFeeCents);
+        order.setDeliveryFeeCents(prices.deliveryFeeCents());
+        order.setDriverPayCents(prices.driverPayCents());
         order.setCreatedAt(Instant.now());
         order.setDeliveryCode("%04d".formatted(RANDOM.nextInt(10_000)));
         orders.save(order);
@@ -136,7 +149,7 @@ public class OrderService {
             line.setName(product.name());
             line.setQuantity(quantities.get(product.id()));
             line.setShopPriceCents(product.priceCents());
-            line.setCustomerPriceCents(pricing.customerPrice(product.priceCents()));
+            line.setCustomerPriceCents(prices.customerPrice(product.priceCents(), product.category()));
             lines.add(line);
         }
         items.saveAll(lines);
@@ -150,7 +163,9 @@ public class OrderService {
     @Transactional
     public CustomerOrderView cancel(Long customerId, Long orderId) {
         Order order = forCustomer(customerId, orderId);
-        move(orderId, Status.PLACED, Status.CANCELLED);
+        if (orders.cancel(orderId, Status.PLACED, Status.CANCELLED, null) == 0) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Order is not PLACED any more");
+        }
         restoreStock(order);
         return customerView(forCustomer(customerId, orderId));
     }
@@ -335,13 +350,121 @@ public class OrderService {
         }
     }
 
-    /** Call only after winning a move() out of PLACED, so it can never run twice for one order. */
+    /**
+     * Puts the order's units back on the shelf. Call only after winning a status
+     * change out of an active status before pickup, so it can never run twice for
+     * one order. Lines the shop marked unavailable are skipped: the shop said it
+     * does not have them, and their stock was already set to zero.
+     */
     private void restoreStock(Order order) {
         for (OrderItem line : items.findByOrderIdInOrderById(List.of(order.getId()))) {
-            if (line.getShopProductId() != null) {
+            if (line.getShopProductId() != null && !line.isUnavailable()) {
                 stock.restore(order.getShopId(), line.getShopProductId(), line.getQuantity());
             }
         }
+    }
+
+    // ---------------------------------------------------------------- admin
+
+    /**
+     * Admin cancels an order that is not finished. Before pickup the stock goes
+     * back to the shop; after pickup the goods have left the shop, so it does not.
+     * If the order moves on at the same moment (the shop accepts, the driver
+     * picks up), admin gets 409 and can look again.
+     */
+    @Transactional
+    public AdminOrderView adminCancel(Long orderId, String reason) {
+        Order order = require(orderId);
+        if (!ACTIVE.contains(order.getStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Order is already finished: " + order.getStatus());
+        }
+        if (orders.cancel(orderId, order.getStatus(), Status.CANCELLED, reason) == 0) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "The order just changed. Look at it again and retry.");
+        }
+        if (order.getStatus() != Status.PICKED_UP) {
+            restoreStock(order);
+        }
+        // ponytail: the customer's refund goes here when the payment part exists.
+        return getForAdmin(orderId);
+    }
+
+    /**
+     * Admin gives the job to a driver, taking it from any driver who had it.
+     * The caller checks the driver is approved. The driver must be free; a
+     * unique index in the database backs this up if two assignments race.
+     */
+    @Transactional
+    public AdminOrderView adminAssignDriver(Long orderId, Long driverId) {
+        Order order = require(orderId);
+        if (!driverId.equals(order.getDriverId())) {
+            if (orders.existsByDriverIdAndStatusIn(driverId, WITH_A_DRIVER)) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "That driver is on another delivery");
+            }
+            if (orders.setDriver(orderId, driverId, WAITING_FOR_PICKUP) == 0) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "Only orders waiting for pickup (ACCEPTED or READY) can be assigned");
+            }
+        }
+        return getForAdmin(orderId);
+    }
+
+    /** Takes the job off its driver before pickup; it goes back to the pool for any driver. */
+    @Transactional
+    public AdminOrderView adminRemoveDriver(Long orderId) {
+        require(orderId);
+        if (orders.clearDriver(orderId, WAITING_FOR_PICKUP) == 0) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "The order has no driver, or is already picked up");
+        }
+        return getForAdmin(orderId);
+    }
+
+    /** Every order, newest first, narrowed by any of the filters given. needsDriver = waiting for pickup with no driver. */
+    @Transactional(readOnly = true)
+    public Page<AdminOrderView> listForAdmin(Status status, Long shopId, Long customerId, Long driverId,
+            boolean needsDriver, int page, int size) {
+        Specification<Order> filters = (root, query, cb) -> {
+            List<Predicate> where = new ArrayList<>();
+            if (status != null) {
+                where.add(cb.equal(root.get("status"), status));
+            }
+            if (shopId != null) {
+                where.add(cb.equal(root.get("shopId"), shopId));
+            }
+            if (customerId != null) {
+                where.add(cb.equal(root.get("customerId"), customerId));
+            }
+            if (driverId != null) {
+                where.add(cb.equal(root.get("driverId"), driverId));
+            }
+            if (needsDriver) {
+                where.add(cb.isNull(root.get("driverId")));
+                where.add(root.get("status").in(WAITING_FOR_PICKUP));
+            }
+            return cb.and(where.toArray(Predicate[]::new));
+        };
+        Page<Order> found = orders.findAll(filters, newestFirst(page, size));
+        return adminViews(found);
+    }
+
+    @Transactional(readOnly = true)
+    public AdminOrderView getForAdmin(Long orderId) {
+        return adminViews(new PageImpl<>(List.of(require(orderId)))).getContent().get(0);
+    }
+
+    /** Builds admin views for a page of orders with one query each for lines, shop names and user names. */
+    private Page<AdminOrderView> adminViews(Page<Order> found) {
+        Map<Long, List<OrderItem>> lines = linesOf(found.getContent());
+        Map<Long, String> shopNames = shops.names(found.stream().map(Order::getShopId).collect(Collectors.toSet()));
+        Set<Long> userIds = new HashSet<>();
+        found.forEach(o -> {
+            userIds.add(o.getCustomerId());
+            if (o.getDriverId() != null) {
+                userIds.add(o.getDriverId());
+            }
+        });
+        Map<Long, String> userNames = users.findAllById(userIds).stream().collect(Collectors.toMap(User::getId, User::getName));
+        return found.map(o -> OrderViews.admin(o, shopNames.get(o.getShopId()), userNames,
+                lines.getOrDefault(o.getId(), List.of())));
     }
 
     // -------------------------------------------------------------- reads

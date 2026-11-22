@@ -8,6 +8,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
+import java.util.List;
 import org.springframework.data.domain.Page;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -57,6 +58,12 @@ public class CatalogController {
     Page<CatalogProduct> search(@RequestParam(defaultValue = "") String q,
             @RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "20") int size) {
         return products.search(Status.APPROVED, q, Paging.of(page, size));
+    }
+
+    /** Every category that has an approved product, A to Z. For category tabs and the admin markup screen. */
+    @GetMapping("/api/catalog/categories")
+    List<String> categories() {
+        return products.categories(Status.APPROVED);
     }
 
     @PostMapping("/api/shops/me/product-requests")

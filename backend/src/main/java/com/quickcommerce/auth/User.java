@@ -1,5 +1,6 @@
 package com.quickcommerce.auth;
 
+import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
@@ -7,6 +8,7 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import java.time.Instant;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -26,4 +28,9 @@ public class User {
     private String name;
     @Enumerated(EnumType.STRING)
     private Role role;
+    /** Suspended by admin. Changed only by UserRepository.setDisabled. */
+    @Column(insertable = false, updatable = false)
+    private boolean disabled;
+    @Column(insertable = false, updatable = false)
+    private Instant createdAt;
 }

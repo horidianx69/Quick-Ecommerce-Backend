@@ -83,10 +83,6 @@ class ShopBackendTest extends ApiTestBase {
         assertEquals(400, put("/api/shops/me", shop, VALID_SHOP.replace("v3t 1a1", "12345")).status());
         assertEquals(400, put("/api/shops/me", shop, VALID_SHOP.replace("49.19", "200")).status());
         assertEquals(400, put("/api/shops/me", shop, VALID_SHOP.replace("\"BC\"", "\"XX\"")).status());
-        assertEquals(400, put("/api/shops/me", shop, VALID_SHOP.replace("TUESDAY", "MONDAY")).status(),
-                "same day twice");
-        assertEquals(400, put("/api/shops/me", shop, VALID_SHOP.replace("21:00", "08:00")).status(),
-                "closes before opens");
         Res empty = put("/api/shops/me", shop, "{}");
         assertEquals(400, empty.status());
         assertNotNull(empty.read("$.errors.name"), "validation errors name each bad field: " + empty.body());
@@ -96,19 +92,26 @@ class ShopBackendTest extends ApiTestBase {
         assertEquals(200, created.status(), created.body());
         assertEquals("PENDING", created.read("$.status"));
         assertEquals("V3T 1A1", created.read("$.postalCode"));
-        assertEquals(2, created.<List<?>>read("$.hours").size());
+        assertEquals("America/Vancouver", created.read("$.timeZone"), "time zone follows the province");
+        assertEquals(0, created.<List<?>>read("$.hours").size(), "no hours until admin sets them");
         long shopId = created.id();
+
+        // Opening hours are admin's: hours sent by the owner are ignored.
+        Res ownHours = put("/api/shops/me", shop, VALID_SHOP.replace("}",
+                ",\"hours\":[{\"dayOfWeek\":\"MONDAY\",\"opens\":\"09:00\",\"closes\":\"21:00\"}]}"));
+        assertEquals(200, ownHours.status(), ownHours.body());
+        assertEquals(0, ownHours.<List<?>>read("$.hours").size());
+        assertEquals("America/Toronto", put("/api/shops/me", shop, VALID_SHOP.replace("\"BC\"", "\"ON\"").replace("v3t 1a1", "M5V 2T6"))
+                .read("$.timeZone"), "moving province moves the time zone");
 
         // An owner cannot approve themself: a status in the body is ignored.
         String edited = VALID_SHOP.replace("Corner Stop", "Corner Stop 2")
-                .replace("{\"name\"", "{\"status\":\"APPROVED\",\"name\"")
-                .replaceAll(",\\s*\\{\"dayOfWeek\":\"TUESDAY\"[^}]*}", "");
+                .replace("{\"name\"", "{\"status\":\"APPROVED\",\"name\"");
         Res updated = put("/api/shops/me", shop, edited);
         assertEquals(200, updated.status(), updated.body());
         assertEquals(shopId, updated.id(), "second PUT updates, it does not create a second shop");
         assertEquals("Corner Stop 2", updated.read("$.name"));
         assertEquals("PENDING", updated.read("$.status"));
-        assertEquals(1, updated.<List<?>>read("$.hours").size(), "hours are replaced, not appended");
 
         Res pending = get("/api/admin/shops?status=PENDING&size=200", admin);
         assertTrue(pending.<List<?>>read("$.content[?(@.id == " + shopId + ")]").size() == 1);
@@ -243,7 +246,10 @@ class ShopBackendTest extends ApiTestBase {
                 "/api/shops/me/products", "/api/shops/me/products/{id}/stock", "/api/catalog",
                 "/api/admin/shops/{id}/status", "/api/admin/catalog/{id}",
                 "/api/orders", "/api/orders/{id}/cancel", "/api/shops/me/orders", "/api/shops/me/orders/{id}/accept",
-                "/api/shops/me/orders/{id}/reject", "/api/shops/me/orders/{id}/ready")) {
+                "/api/shops/me/orders/{id}/reject", "/api/shops/me/orders/{id}/ready",
+                "/api/admin/settings", "/api/admin/settings/markups/{category}", "/api/admin/orders", "/api/admin/orders/{id}/cancel",
+                "/api/admin/orders/{orderId}/assign", "/api/admin/orders/{orderId}/unassign", "/api/admin/shops/{id}/hours",
+                "/api/admin/users", "/api/admin/users/{id}/disabled", "/api/admin/stats", "/api/catalog/categories")) {
             assertTrue(docs.body().contains("\"" + path + "\""), "missing in contract: " + path);
         }
     }

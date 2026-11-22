@@ -8,10 +8,11 @@ import java.util.Optional;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 
-public interface OrderRepository extends JpaRepository<Order, Long> {
+public interface OrderRepository extends JpaRepository<Order, Long>, JpaSpecificationExecutor<Order> {
 
     Optional<Order> findByCustomerIdAndIdempotencyKey(Long customerId, String idempotencyKey);
 
@@ -38,7 +39,21 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     @Query("update Order o set o.status = :to where o.id = :id and o.status = :from")
     int move(Long id, Status from, Status to);
 
+    /** Cancels only if the order is still in the status the caller saw. reason null = the customer cancelled. */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("update Order o set o.status = :cancelled, o.cancelReason = :reason where o.id = :id and o.status = :from")
+    int cancel(Long id, Status from, Status cancelled, String reason);
+
     // ------------------------------------------------------- driver steps
+
+    /** Admin's assignment: sets the driver whether or not the order already had one. */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("update Order o set o.driverId = :driverId where o.id = :id and o.status in :statuses")
+    int setDriver(Long id, Long driverId, Collection<Status> statuses);
+
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("update Order o set o.driverId = null where o.id = :id and o.driverId is not null and o.status in :statuses")
+    int clearDriver(Long id, Collection<Status> statuses);
 
     boolean existsByDriverIdAndStatusIn(Long driverId, Collection<Status> statuses);
 

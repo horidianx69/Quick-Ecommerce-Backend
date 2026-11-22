@@ -2,6 +2,7 @@ package com.quickcommerce.order;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 /**
  * The two faces of one order. Each side sees only its own money:
@@ -26,7 +27,8 @@ public final class OrderViews {
             String note,
             Instant createdAt,
             boolean driverAssigned,
-            String deliveryCode) {}
+            String deliveryCode,
+            String cancelReason) {}
 
     /** payoutCents = what the shop earns for the items it can supply. */
     public record ShopOrderView(
@@ -36,7 +38,34 @@ public final class OrderViews {
             int payoutCents,
             String note,
             Instant createdAt,
-            boolean driverAssigned) {}
+            boolean driverAssigned,
+            String cancelReason) {}
+
+    /** A shop, customer or driver as admin sees them on an order. */
+    public record Party(Long id, String name) {}
+
+    /** Both prices per line: what the shop earns and what the customer pays. */
+    public record AdminLine(Long id, Long productId, String name, int quantity, int shopPriceCents,
+            int customerPriceCents, boolean unavailable) {}
+
+    /** Everything about an order, for admin only. driver is null until one is assigned. */
+    public record AdminOrderView(
+            Long id,
+            Order.Status status,
+            Instant createdAt,
+            Instant deliveredAt,
+            Party shop,
+            Party customer,
+            Party driver,
+            List<AdminLine> items,
+            int subtotalCents,
+            int deliveryFeeCents,
+            int totalCents,
+            int shopPayoutCents,
+            int driverPayCents,
+            DeliveryAddress address,
+            String note,
+            String cancelReason) {}
 
     private OrderViews() {}
 
@@ -50,7 +79,7 @@ public final class OrderViews {
                 subtotal, o.getDeliveryFeeCents(), subtotal + o.getDeliveryFeeCents(),
                 new DeliveryAddress(o.getAddressLine(), o.getCity(), o.getProvince(), o.getPostalCode(),
                         o.getLatitude(), o.getLongitude()),
-                o.getNote(), o.getCreatedAt(), o.getDriverId() != null, o.getDeliveryCode());
+                o.getNote(), o.getCreatedAt(), o.getDriverId() != null, o.getDeliveryCode(), o.getCancelReason());
     }
 
     static ShopOrderView shop(Order o, List<OrderItem> items) {
@@ -58,7 +87,23 @@ public final class OrderViews {
                 .mapToInt(i -> i.getQuantity() * i.getShopPriceCents()).sum();
         return new ShopOrderView(o.getId(), o.getStatus(),
                 items.stream().map(i -> line(i, i.getShopPriceCents())).toList(),
-                payout, o.getNote(), o.getCreatedAt(), o.getDriverId() != null);
+                payout, o.getNote(), o.getCreatedAt(), o.getDriverId() != null, o.getCancelReason());
+    }
+
+    static AdminOrderView admin(Order o, String shopName, Map<Long, String> userNames, List<OrderItem> items) {
+        List<OrderItem> supplied = items.stream().filter(i -> !i.isUnavailable()).toList();
+        int subtotal = supplied.stream().mapToInt(i -> i.getQuantity() * i.getCustomerPriceCents()).sum();
+        int payout = supplied.stream().mapToInt(i -> i.getQuantity() * i.getShopPriceCents()).sum();
+        return new AdminOrderView(o.getId(), o.getStatus(), o.getCreatedAt(), o.getDeliveredAt(),
+                new Party(o.getShopId(), shopName),
+                new Party(o.getCustomerId(), userNames.get(o.getCustomerId())),
+                o.getDriverId() == null ? null : new Party(o.getDriverId(), userNames.get(o.getDriverId())),
+                items.stream().map(i -> new AdminLine(i.getId(), i.getProductId(), i.getName(), i.getQuantity(),
+                        i.getShopPriceCents(), i.getCustomerPriceCents(), i.isUnavailable())).toList(),
+                subtotal, o.getDeliveryFeeCents(), subtotal + o.getDeliveryFeeCents(), payout, o.getDriverPayCents(),
+                new DeliveryAddress(o.getAddressLine(), o.getCity(), o.getProvince(), o.getPostalCode(),
+                        o.getLatitude(), o.getLongitude()),
+                o.getNote(), o.getCancelReason());
     }
 
     private static Line line(OrderItem i, int unitPriceCents) {

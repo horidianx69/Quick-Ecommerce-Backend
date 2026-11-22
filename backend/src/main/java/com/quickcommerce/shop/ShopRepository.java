@@ -17,6 +17,13 @@ public interface ShopRepository extends JpaRepository<Shop, Long> {
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     Optional<Shop> findWithLockByOwnerId(Long ownerId);
 
+    /** The same lock, found by shop id: for admin's hours changes. */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    Optional<Shop> findWithLockById(Long id);
+
+    @Query(value = "select exists (select 1 from shops s where s.id = :id and " + Shop.OPEN_NOW_SQL + ")", nativeQuery = true)
+    boolean isOpenNow(Long id);
+
     Page<Shop> findByStatus(Shop.Status status, Pageable pageable);
 
     /** The only way status changes: one statement that touches no other column. */
