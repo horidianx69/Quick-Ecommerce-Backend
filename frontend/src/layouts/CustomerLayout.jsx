@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, NavLink, Outlet, useNavigate, useSearchParams } from 'react-router'
-import { ChevronDown, LocateFixed, LogOut, MapPin, Receipt, Search, ShoppingBag, Trash2 } from 'lucide-react'
+import { ChevronDown, LogOut, MapPin, Receipt, Search, ShoppingBag, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAuth } from '../lib/auth'
 import { useCart, usePlace } from '../lib/store'
@@ -8,7 +8,7 @@ import { money } from '../lib/format'
 import { Button, Empty, Field, Input, Modal, ProductArt, Stepper } from '../components/ui'
 import { EtaChip } from '../components/ProductCard'
 import MapView from '../components/MapView'
-import { BRAND } from '../brand'
+import { BRAND, DELIVERY_KM } from '../brand'
 
 export function Logo({ suffix, to = '/' }) {
   return (
@@ -36,24 +36,14 @@ function SearchBox() {
 function LocationModal({ open, onClose }) {
   const { place, setPlace } = usePlace()
   const [draft, setDraft] = useState(place)
-  const [locating, setLocating] = useState(false)
   useEffect(() => { if (open) setDraft(place) }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
-  const locate = () => {
-    if (!navigator.geolocation) return toast.error('This browser cannot share its location')
-    setLocating(true)
-    navigator.geolocation.getCurrentPosition(
-      (p) => { setLocating(false); setDraft((d) => ({ ...d, latitude: p.coords.latitude, longitude: p.coords.longitude, label: 'Current location' })) },
-      () => { setLocating(false); toast.error('Location permission was denied') },
-    )
-  }
   return (
     <Modal open={open} onClose={onClose} title="Where should we deliver?"
       footer={<Button className="w-full" size="lg" onClick={() => { setPlace(draft); onClose(); toast.success(`Delivering to ${draft.label}`) }}>Deliver here</Button>}>
       <div className="grid gap-4">
-        <Button variant="secondary" onClick={locate} loading={locating}><LocateFixed className="size-4" />Use my current location</Button>
         <MapView center={[draft.latitude, draft.longitude]} points={[{ key: 'me', ...draft, color: '#18171c' }]}
-          onPick={(p) => setDraft((d) => ({ ...d, ...p, label: d.label === 'Current location' ? 'Pinned location' : d.label }))} />
-        <Field label="Name this place" hint="Shops within 10 km of the pin that are open right now will show up.">
+          onPick={(p) => setDraft((d) => ({ ...d, ...p }))} />
+        <Field label="Name this place" hint={`Shops within ${DELIVERY_KM} km of the pin that are open right now will show up.`}>
           <Input value={draft.label} onChange={(e) => setDraft({ ...draft, label: e.target.value })} />
         </Field>
       </div>

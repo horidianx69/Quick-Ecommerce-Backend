@@ -89,6 +89,10 @@ function CurrentDelivery({ d, pos }) {
       {d.status !== 'PICKED_UP' ? (
         <>
           <StopCard title="Pickup" stop={d.pickup} icon={Store} />
+          <div className="flex items-center justify-between gap-3 rounded-2xl bg-ink px-4 py-3 text-white">
+            <span className="text-sm text-white/70">At the counter, tell the shop</span>
+            <span className="font-display text-2xl font-extrabold">Order #{d.orderId}</span>
+          </div>
           <div className="rounded-xl bg-brand-50 px-3 py-2 text-sm">Drop-off in {d.dropoffCity}, {km(d.dropKm)} from the shop. You'll see the address after pickup.</div>
           {d.status === 'ACCEPTED' && <p className="flex items-center gap-2 text-sm text-muted"><Clock className="size-4" />The shop is still packing. You can pick up once it's marked ready.</p>}
           <Button size="lg" disabled={d.status !== 'READY'} loading={pickedUp.isPending} onClick={() => pickedUp.mutate()}><Package className="size-5" />I've picked it up</Button>

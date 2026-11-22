@@ -111,6 +111,8 @@ class DriverTest extends ApiTestBase {
         assertEquals(0, get("/api/drivers/me/jobs", driver.token()).<List<?>>read("$").size(), "one delivery at a time");
         assertTrue(get("/api/shops/me/orders/" + orderId, s.shop()).<Boolean>read("$.driverAssigned"));
         assertTrue(get("/api/orders/" + orderId, s.customer()).<Boolean>read("$.driverAssigned"));
+        String riderName = get("/api/auth/me", driver.token()).read("$.name");
+        assertEquals(riderName, get("/api/orders/" + orderId, s.customer()).read("$.driverName"), "the customer sees who is bringing it");
 
         // 3. Pickup is possible only once the shop says the order is ready.
         assertEquals(409, post("/api/drivers/me/delivery/picked-up", driver.token(), null).status(), "shop is still packing");

@@ -27,6 +27,7 @@ public final class OrderViews {
             String note,
             Instant createdAt,
             boolean driverAssigned,
+            String driverName,
             String deliveryCode,
             String cancelReason) {}
 
@@ -71,7 +72,7 @@ public final class OrderViews {
 
     // ponytail: no sales tax in the totals yet. Rates and which items are taxed
     // depend on the launch province, which is still undecided.
-    static CustomerOrderView customer(Order o, String shopName, List<OrderItem> items) {
+    static CustomerOrderView customer(Order o, String shopName, List<OrderItem> items, String driverName) {
         int subtotal = items.stream().filter(i -> !i.isUnavailable())
                 .mapToInt(i -> i.getQuantity() * i.getCustomerPriceCents()).sum();
         return new CustomerOrderView(o.getId(), o.getShopId(), shopName, o.getStatus(),
@@ -79,7 +80,7 @@ public final class OrderViews {
                 subtotal, o.getDeliveryFeeCents(), subtotal + o.getDeliveryFeeCents(),
                 new DeliveryAddress(o.getAddressLine(), o.getCity(), o.getProvince(), o.getPostalCode(),
                         o.getLatitude(), o.getLongitude()),
-                o.getNote(), o.getCreatedAt(), o.getDriverId() != null, o.getDeliveryCode(), o.getCancelReason());
+                o.getNote(), o.getCreatedAt(), o.getDriverId() != null, driverName, o.getDeliveryCode(), o.getCancelReason());
     }
 
     static ShopOrderView shop(Order o, List<OrderItem> items) {

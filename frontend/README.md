@@ -26,6 +26,26 @@ npm run seed   # demo shops, products, customer, driver (the backend's local dat
 npm run dev    # http://localhost:5173
 ```
 
+The demo shops are in Surrey, BC, and customers only see shops within 5 km of their pin (the backend's `MAX_DELIVERY_KM`). Testing from somewhere else? Add three demo shops around your own pin. When no shops are near the pin, the home screen shows this exact command (dev only):
+
+```bash
+npm run seed -- --near 28.6139,77.2090
+```
+
+Running it again with a new spot moves those three shops there.
+
+## Test one order end to end
+
+After `npm run seed`, everything sits around the customer's default pin in Surrey, BC. In dev, the login page has one-click demo accounts under "Dev only".
+
+1. **Customer:** add items and check out. The address is prefilled in dev. The order goes to King George Corner Store, the nearest shop, which stocks everything.
+2. **Shop owner:** the order is under *New*. Accept it.
+3. **Driver:** already online nearby; the job is listed. Accept it. The pickup card says which order number to tell the shop.
+4. **Shop owner:** the card says to hand it to the rider who says that order number. Mark it packed.
+5. **Driver:** *I've picked it up*, then enter the 4-digit code from the customer's order page.
+6. **Customer:** shows the rider's name and live position while it's on the way.
+7. **Admin:** *Orders* shows the shop, customer, rider and the money split.
+
 On the login page (dev only) there are one-click buttons for the demo customer, shop owner, driver and admin. Their passwords are in `src/lib/demo.js`.
 
 The dev server forwards `/api` to `localhost:8080`, so no CORS setup is needed. For a deployed build, set `VITE_API_URL` to the backend's address and add the site to the backend's `CORS_ALLOWED_ORIGINS`.

@@ -70,7 +70,8 @@ function OrderCard({ o }) {
           <span className="text-muted">You're paid </span><b className="tabular">{money(payout)}</b>
           {['ACCEPTED', 'READY'].includes(o.status) && (
             <span className={`ml-3 inline-flex items-center gap-1 text-xs font-semibold ${o.driverAssigned ? 'text-emerald-700' : 'text-muted'}`}>
-              <Bike className="size-3.5" />{o.driverAssigned ? 'Driver on the way' : 'Finding a driver'}
+              <Bike className="size-3.5" />
+              {o.driverAssigned ? `Rider on the way. Hand it to the rider who says order #${o.id}` : 'Finding a rider'}
             </span>
           )}
         </div>

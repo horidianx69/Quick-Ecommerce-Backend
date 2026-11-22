@@ -4,7 +4,7 @@ import { ArrowRight, Bike, ChevronLeft, ChevronRight, Clock, KeyRound, MapPin, M
 import { Logo } from '../layouts/CustomerLayout'
 import { iconFor, ProductArt } from '../components/ui'
 import { money } from '../lib/format'
-import { BRAND } from '../brand'
+import { BRAND, DELIVERY_KM } from '../brand'
 
 // Guests can't call the browse API (it needs a customer login), so the landing page shows a fixed showcase.
 // Every product click goes to sign in.
@@ -19,7 +19,7 @@ const SHOWCASE = [
 const AISLES = ['Dairy', 'Snacks', 'Drinks', 'Produce', 'Frozen', 'Bakery', 'Pantry', 'Household', 'Personal care']
 
 const SLIDES = [
-  { tone: 'red', icon: Zap, eyebrow: 'Fast', title: 'Milk ran out? Back in minutes.', text: 'Shops within 10 km, a local rider, and your order at the door before the kettle cools.', cta: 'Start shopping', to: '/signup' },
+  { tone: 'red', icon: Zap, eyebrow: 'Fast', title: 'Milk ran out? Back in minutes.', text: `Shops within ${DELIVERY_KM} km, a local rider, and your order at the door before the kettle cools.`, cta: 'Start shopping', to: '/signup' },
   { tone: 'black', icon: Moon, eyebrow: 'Late night', title: 'Snack attack at 11 pm.', text: "Chips, ice cream and cold drinks from the corner stores that are still open near you.", cta: 'See what’s open', to: '/signup' },
   { tone: 'white', icon: Store, eyebrow: 'Local', title: 'Every order supports a shop down the street.', text: 'Independent Canadian shops set their own prices and keep their own customers.', cta: 'Sell on QuikE', to: '/signup/owner' },
 ]
@@ -63,7 +63,7 @@ function Hero() {
           <Link to="/login" className="inline-flex h-12 items-center rounded-2xl border-2 border-ink px-6 font-semibold hover:bg-ink hover:text-white">Sign in</Link>
         </div>
         <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-muted">
-          <span className="flex items-center gap-2"><MapPin className="size-4 text-brand-500" />Shops within 10 km</span>
+          <span className="flex items-center gap-2"><MapPin className="size-4 text-brand-500" />Shops within {DELIVERY_KM} km</span>
           <span className="flex items-center gap-2"><KeyRound className="size-4 text-brand-500" />4-digit code at the door</span>
         </div>
       </div>
@@ -217,7 +217,7 @@ function Posters() {
 
 function HowItWorks() {
   const steps = [
-    ['Pick your items', 'We show products from open shops within 10 km, each from the nearest shop that has it.'],
+    ['Pick your items', `We show products from open shops within ${DELIVERY_KM} km, each from the nearest shop that has it.`],
     ['The shop packs it', 'A local shop accepts and packs your order while a rider heads over.'],
     ['Read your code at the door', 'Your rider hands it over when you read out the 4-digit code from the app.'],
   ]

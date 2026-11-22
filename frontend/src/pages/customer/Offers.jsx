@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useLocation, useParams } from 'react-router'
 import { ArrowLeft, ChevronRight, Store } from 'lucide-react'
 import { api } from '../../lib/api'
+import { DELIVERY_KM } from '../../brand'
 import { usePlace } from '../../lib/store'
 import { km, money } from '../../lib/format'
 import { Card, Empty, ErrorNote, ProductArt, Spinner } from '../../components/ui'
@@ -46,7 +47,7 @@ export default function Offers() {
         <h2 className="text-xl font-extrabold">Available from {list.length || ''} nearby shop{list.length === 1 ? '' : 's'}</h2>
         <ErrorNote error={offers.error} />
         {offers.isPending ? <Spinner /> : list.length === 0 ? (
-          <Empty icon={Store} title="Not available near you right now">No open shop within 10 km has this in stock.</Empty>
+          <Empty icon={Store} title="Not available near you right now">No open shop within {DELIVERY_KM} km has this in stock.</Empty>
         ) : list.map((o, i) => (
           <Card key={o.shopProductId} className="flex flex-wrap items-center gap-4 p-4">
             <div className="grid size-11 place-items-center rounded-xl bg-paper"><Store className="size-5" /></div>

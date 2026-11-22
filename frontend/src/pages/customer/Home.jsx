@@ -1,7 +1,9 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { Link, useSearchParams } from 'react-router'
 import { MapPinOff, SearchX, X, Zap } from 'lucide-react'
 import { api } from '../../lib/api'
+import { DELIVERY_KM } from '../../brand'
 import { usePlace } from '../../lib/store'
 import { useAuth } from '../../lib/auth'
 import { Button, Empty, ErrorNote, iconFor, Spinner, tintFor } from '../../components/ui'
@@ -35,6 +37,21 @@ export function useFeed(path, key, query) {
     initialPageParam: 0,
     getNextPageParam: (last) => (last.hasMore ? last.page + 1 : undefined),
   })
+}
+
+/** Dev only: the command that puts demo shops around this pin (see scripts/seed.mjs). */
+function SeedHint({ place }) {
+  const cmd = `npm run seed -- --near ${place.latitude.toFixed(5)},${place.longitude.toFixed(5)}`
+  const copy = () => navigator.clipboard?.writeText(cmd).then(() => toast.success('Copied. Run it in the frontend folder, then refresh.'), () => toast.error('Copy failed. Select the command and copy it.'))
+  return (
+    <div className="grid w-full max-w-md gap-2 rounded-xl border border-dashed border-line bg-white p-3 text-left text-xs">
+      <span className="font-semibold text-muted">Testing locally? Add 3 demo shops around this pin:</span>
+      <div className="flex items-center gap-2">
+        <code className="min-w-0 flex-1 select-all overflow-x-auto whitespace-nowrap rounded-lg bg-paper px-2 py-1.5">{cmd}</code>
+        <Button size="sm" variant="secondary" onClick={copy}>Copy</Button>
+      </div>
+    </div>
+  )
 }
 
 export default function Home() {
@@ -105,7 +122,7 @@ export default function Home() {
           <div className="grid place-items-center py-16"><Spinner className="size-7" /></div>
         ) : cards.length === 0 ? (
           browsing
-            ? <Empty icon={MapPinOff} title="No shops are open near you right now">We show shops within 10 km of {place.label} that are open at this moment. Try another location from the top bar, or check back later.</Empty>
+            ? <Empty icon={MapPinOff} title="No shops are open near you right now" action={import.meta.env.DEV && <SeedHint place={place} />}>We show shops within {DELIVERY_KM} km of {place.label} that are open at this moment. Try another location from the top bar, or check back later.</Empty>
             : <Empty icon={SearchX} title="Nothing found">Try a shorter search or another aisle.</Empty>
         ) : (
           <>

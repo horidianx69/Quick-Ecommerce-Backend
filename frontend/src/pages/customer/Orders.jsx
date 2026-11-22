@@ -41,8 +41,8 @@ export function OrderList() {
 
 const HEADLINE = {
   PLACED: ['Waiting for the shop', 'The shop has 10 minutes to accept your order.'],
-  ACCEPTED: ['The shop is packing your order', 'A driver is heading to the shop.'],
-  READY: ['Packed and waiting for the driver', 'Your driver will pick it up any moment.'],
+  ACCEPTED: ['The shop is packing your order', 'A rider is heading to the shop.'],
+  READY: ['Packed and waiting for the rider', 'Your rider will pick it up any moment.'],
   PICKED_UP: ['On the way to you', 'Have your delivery code ready.'],
   DELIVERED: ['Delivered', 'Enjoy! Thanks for shopping local.'],
   REJECTED: ['The shop could not take this order', "You haven't been charged."],
@@ -105,12 +105,18 @@ export function OrderDetail() {
           <StatusBadge status={o.status} />
         </div>
         <Progress status={o.status} />
+        {['ACCEPTED', 'READY', 'PICKED_UP'].includes(o.status) && (
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <Bike className="size-4 text-brand-500" />
+            {o.driverName ? `Your rider: ${o.driverName}` : 'Finding a rider near the shop…'}
+          </div>
+        )}
         {driver && (
           <div className="grid gap-3">
-            <div className="flex items-center gap-2 font-semibold"><Bike className="size-5 text-brand-500" />Your driver is about {driver.etaMinutes} min away</div>
+            <div className="flex items-center gap-2 font-semibold"><Bike className="size-5 text-brand-500" />Your rider is about {driver.etaMinutes} min away</div>
             <MapView height={300} center={[driver.latitude, driver.longitude]} points={[
               { key: 'drop', ...drop, color: '#18171c', label: 'You' },
-              { key: 'driver', latitude: driver.latitude, longitude: driver.longitude, label: 'Driver', permanent: true },
+              { key: 'driver', latitude: driver.latitude, longitude: driver.longitude, label: 'Rider', permanent: true },
             ]} />
           </div>
         )}
@@ -138,7 +144,7 @@ export function OrderDetail() {
             <Card className="grid gap-2 border-0 bg-ink p-5 text-white">
               <div className="flex items-center gap-2 text-sm text-white/70"><KeyRound className="size-4" />Delivery code</div>
               <div className="font-display text-5xl font-extrabold tracking-[0.25em] text-white tabular">{o.deliveryCode}</div>
-              <p className="text-xs text-white/60">Tell this to your driver at the door. Don't share it before they arrive.</p>
+              <p className="text-xs text-white/60">Tell this to your rider at the door. Don't share it before they arrive.</p>
             </Card>
           )}
           {o.status === 'DELIVERED' && <Card className="flex items-center gap-3 p-5 font-semibold text-emerald-700"><Check className="size-5" />Delivered</Card>}

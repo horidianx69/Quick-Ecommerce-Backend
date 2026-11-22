@@ -14,11 +14,13 @@ function usePersisted(key, initial) {
 export const DEFAULT_PLACE = {
   label: 'Surrey, BC', latitude: 49.2, longitude: -122.86,
   addressLine: '', city: 'Surrey', province: 'BC', postalCode: '',
+  // Dev only: a dummy address next to the demo shops, so test orders need no typing.
+  ...(import.meta.env.DEV && { addressLine: '10250 140 St, Unit 12', postalCode: 'V3T 4M3' }),
 }
 const PlaceContext = createContext(null)
 
 export function PlaceProvider({ children }) {
-  const [place, setPlaceRaw] = usePersisted('townline.place', DEFAULT_PLACE)
+  const [place, setPlaceRaw] = usePersisted('quike.place', DEFAULT_PLACE)
   const setPlace = (patch) => setPlaceRaw((p) => ({ ...p, ...patch }))
   return <PlaceContext.Provider value={{ place, setPlace }}>{children}</PlaceContext.Provider>
 }
@@ -30,8 +32,9 @@ const CartContext = createContext(null)
 const EMPTY = { shopId: null, shop: null, items: [] }
 
 export function CartProvider({ children }) {
-  const [cart, setCart] = usePersisted('townline.cart', EMPTY)
+  const [cart, setCart] = usePersisted('quike.cart', EMPTY)
   const [open, setOpen] = useState(false)
+  const { place } = usePlace()
 
   const api = {
     ...cart,
@@ -43,7 +46,9 @@ export function CartProvider({ children }) {
     add(item, shop, replace = false) {
       if (cart.shopId && cart.shopId !== shop.shopId && cart.items.length && !replace) return false
       setCart((c) => {
-        const base = c.shopId === shop.shopId && !replace ? c : { shopId: shop.shopId, shop, items: [] }
+        // A new cart remembers the delivery pin it was filled from, so checkout can put the pin back if it drifts out of range.
+        const pin = { latitude: place.latitude, longitude: place.longitude, label: place.label }
+        const base = c.shopId === shop.shopId && !replace ? c : { shopId: shop.shopId, shop, pin, items: [] }
         if (base.items.length >= 50) return base
         return { ...base, shop, items: [...base.items, { ...item, qty: 1 }] }
       })

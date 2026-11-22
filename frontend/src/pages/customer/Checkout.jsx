@@ -1,11 +1,12 @@
 import { useRef, useState } from 'react'
 import { Link, Navigate, useNavigate } from 'react-router'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { ArrowLeft, MapPin } from 'lucide-react'
-import { api } from '../../lib/api'
+import { ArrowLeft, MapPin, MapPinOff } from 'lucide-react'
+import { api, apiOrNull } from '../../lib/api'
+import { DELIVERY_KM } from '../../brand'
 import { useCart, usePlace } from '../../lib/store'
-import { money, PROVINCES } from '../../lib/format'
+import { km, money, PROVINCES } from '../../lib/format'
 import { Button, Card, ErrorNote, Field, Input, ProductArt, Select, Stepper, Textarea } from '../../components/ui'
 import { EtaChip } from '../../components/ProductCard'
 import MapView from '../../components/MapView'
@@ -13,6 +14,14 @@ import MapView from '../../components/MapView'
 export default function Checkout() {
   const cart = useCart()
   const { place, setPlace } = usePlace()
+  // Does the cart's shop deliver to the current pin? The backend answers 404 when the pin is
+  // outside the delivery range (or it has just closed), so check before the order can fail.
+  const reach = useQuery({
+    queryKey: ['reach', cart.shopId, place.latitude, place.longitude],
+    queryFn: () => apiOrNull(`/api/browse/shops/${cart.shopId}/products`, { query: { lat: place.latitude, lng: place.longitude, size: 1 } }),
+    enabled: !!cart.shopId,
+  })
+  const outOfRange = reach.data === null
   const nav = useNavigate()
   const qc = useQueryClient()
   // One key per checkout attempt: retrying after a network error can never create a second order.
@@ -65,6 +74,19 @@ export default function Checkout() {
             <h2 className="flex items-center gap-2 text-lg font-bold"><MapPin className="size-5 text-brand-500" />Delivery address</h2>
             <MapView height={200} center={[place.latitude, place.longitude]} points={[{ key: 'drop', ...place, color: '#18171c' }]}
               onPick={(p) => setPlace(p)} />
+            {outOfRange ? (
+              <div className="grid gap-2 rounded-xl bg-brand-50 px-4 py-3 text-sm text-brand-700">
+                <span className="flex items-center gap-2 font-semibold"><MapPinOff className="size-4 shrink-0" />The shop in your cart doesn't deliver to this pin</span>
+                <span>Shops deliver within {DELIVERY_KM} km. Move the pin closer, or empty your cart and shop from stores near this pin.</span>
+                {cart.pin && (
+                  <Button size="sm" variant="secondary" className="justify-self-start" onClick={() => setPlace(cart.pin)}>
+                    <MapPin className="size-4" />Put the pin back at {cart.pin.label}
+                  </Button>
+                )}
+              </div>
+            ) : reach.data?.shop && (
+              <p className="text-xs text-muted">The shop is {km(reach.data.shop.distanceKm)} from this pin, about {reach.data.shop.etaMinutes} min away.</p>
+            )}
             <div className="grid gap-3 sm:grid-cols-2">
               <Field label="Street address" className="sm:col-span-2"><Input required value={addr.addressLine} onChange={set('addressLine')} placeholder="77 Main St, Unit 4" /></Field>
               <Field label="City"><Input required value={addr.city} onChange={set('city')} /></Field>
@@ -101,7 +123,7 @@ export default function Checkout() {
           </div>
           <p className="rounded-xl bg-paper px-3 py-2 text-xs text-muted">No payment yet: orders are free to place while payments are being built. If the shop is missing an item, you won't be charged for it.</p>
           <ErrorNote error={error} />
-          <Button type="submit" size="lg" loading={busy}>Place order · {money(cart.subtotal)}+</Button>
+          <Button type="submit" size="lg" loading={busy} disabled={outOfRange}>Place order · {money(cart.subtotal)}+</Button>
         </Card>
       </div>
     </form>

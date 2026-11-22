@@ -21,8 +21,8 @@ export function AuthProvider({ children }) {
 
   useEffect(() => {
     const onLogout = () => { setTok(null); qc.clear() }
-    window.addEventListener('townline:logout', onLogout)
-    return () => window.removeEventListener('townline:logout', onLogout)
+    window.addEventListener('quike:logout', onLogout)
+    return () => window.removeEventListener('quike:logout', onLogout)
   }, [qc])
 
   const finish = (res) => {

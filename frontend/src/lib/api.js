@@ -1,7 +1,7 @@
 // One fetch wrapper for every backend call: adds the login token, sends JSON,
 // and turns the backend's error JSON ({ status, title, detail, errors }) into an ApiError.
 const BASE = import.meta.env.VITE_API_URL ?? ''
-const TOKEN_KEY = 'townline.token'
+const TOKEN_KEY = 'quike.token'
 
 export function getToken() {
   try { return localStorage.getItem(TOKEN_KEY) } catch { return null }
@@ -42,7 +42,7 @@ export async function api(path, { method = 'GET', body, query } = {}) {
   // Token expired (12 h) or account suspended: drop it so the app shows the login screen.
   if (res.status === 401 && token) {
     setToken(null)
-    window.dispatchEvent(new Event('townline:logout'))
+    window.dispatchEvent(new Event('quike:logout'))
   }
 
   const text = await res.text()
