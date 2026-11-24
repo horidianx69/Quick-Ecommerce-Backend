@@ -7,6 +7,7 @@ import com.quickcommerce.shop.ShopService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import java.util.List;
 import org.springframework.data.domain.Page;
@@ -40,7 +41,8 @@ public class CatalogController {
             @Size(max = 32) String barcode,
             @NotBlank @Size(max = 80) String category,
             @NotNull TaxCategory taxCategory,
-            @Size(max = 500) String imageUrl,
+            // Only https links (or empty): a "javascript:" or plain-http link would be unsafe in the apps.
+            @Size(max = 500) @Pattern(regexp = "^(|https://\\S+)$", message = "must be an https:// link") String imageUrl,
             @NotNull Status status) {}
 
     static final int MAX_OPEN_REQUESTS_PER_SHOP = 50;

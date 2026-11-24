@@ -40,6 +40,20 @@ class DriverConcurrencyTest extends ApiTestBase {
     }
 
     @Test
+    void acceptingAndGoingOfflineCannotBothSucceed() {
+        Scene s = scene(10);
+        long orderId = acceptedOrder(s, s.customer(), 1);
+        DriverAt driver = driverNear(s);
+
+        List<Res> results = parallel(2, i -> post(i == 0 ? "/api/drivers/me/jobs/" + orderId + "/accept"
+                : "/api/drivers/me/offline", driver.token(), null));
+
+        assertEquals(1, count(results, 200), ConcurrencyTest.statuses(results));
+        assertEquals(1, count(results, 409));
+        assertEquals(results.getFirst().status() == 200, get("/api/drivers/me", driver.token()).read("$.online"));
+    }
+
+    @Test
     void pickupAndDeliveryEachHappenOnce() {
         Scene s = scene(10);
         long orderId = acceptedOrder(s, s.customer(), 1);
@@ -75,7 +89,7 @@ class DriverConcurrencyTest extends ApiTestBase {
             return post("/api/drivers/me/delivery/delivered", driver.token(),
                     "{\"code\":\"" + (guess.equals(code) ? "9999" : guess) + "\"}");
         });
-        assertTrue(count(guesses, 400) <= 5, "only 5 guesses may be checked, but " + count(guesses, 400) + " were");
+        assertEquals(5, count(guesses, 400), ConcurrencyTest.statuses(guesses));
         assertEquals(40, count(guesses, 400) + count(guesses, 429));
         assertEquals(0, count(guesses, 200));
     }

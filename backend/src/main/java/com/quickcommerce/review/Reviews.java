@@ -5,6 +5,7 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -94,7 +95,7 @@ public class Reviews {
                 .param("a", authorId).param("o", orderId).query((rs, row) -> view(rs)).list();
     }
 
-    public SubjectReviews forSubject(Subject subject, long subjectId, int limit, int offset) {
+    public SubjectReviews forSubject(Subject subject, long subjectId, int limit, long offset) {
         Rating rating = jdbc.sql("select stars_sum, reviews from rating_totals where subject_type = :t and subject_id = :id")
                 .param("t", subject.name()).param("id", subjectId)
                 .query((rs, row) -> Rating.of(rs.getLong(1), rs.getInt(2))).optional().orElse(Rating.of(0, 0));
@@ -139,7 +140,7 @@ public class Reviews {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "You have already reviewed this order");
         }
         String text = comment == null || comment.isBlank() ? null : comment.trim();
-        for (Rated r : ratings) {
+        for (Rated r : ratings.stream().sorted(Comparator.comparing(Rated::subject).thenComparingLong(Rated::subjectId)).toList()) {
             // The unique index on (order, author, subject) is the real guard if two submissions race.
             jdbc.sql("""
                     insert into reviews (order_id, author_id, subject_type, subject_id, stars, comment)
@@ -158,7 +159,8 @@ public class Reviews {
     }
 
     private OrderFacts deliveredOrder(long orderId) {
-        OrderFacts order = jdbc.sql("select id, customer_id, driver_id, shop_id, status, delivered_at from orders where id = :o")
+        // The per-subject unique constraint cannot catch concurrent submissions with different subjects.
+        OrderFacts order = jdbc.sql("select id, customer_id, driver_id, shop_id, status, delivered_at from orders where id = :o for update")
                 .param("o", orderId)
                 .query((rs, row) -> new OrderFacts(rs.getLong("id"), rs.getLong("customer_id"),
                         (Long) rs.getObject("driver_id"), rs.getLong("shop_id"), rs.getString("status"),

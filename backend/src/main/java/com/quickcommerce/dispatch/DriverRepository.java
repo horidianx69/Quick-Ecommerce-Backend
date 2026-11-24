@@ -1,13 +1,19 @@
 package com.quickcommerce.dispatch;
 
+import jakarta.persistence.LockModeType;
 import java.time.Instant;
+import java.util.Optional;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 
 public interface DriverRepository extends JpaRepository<Driver, Long> {
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    Optional<Driver> findWithLockByUserId(Long userId);
 
     @Query(value = """
             select new com.quickcommerce.dispatch.AdminDriverView(

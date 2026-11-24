@@ -108,11 +108,55 @@ class OrderTest extends ApiTestBase {
         Res retry = post("/api/orders", customer, body);
         assertEquals(200, retry.status(), "a replay is 200, not 201");
         assertEquals(first.id(), retry.id());
+        Res changed = post("/api/orders", customer,
+                orderJsonWith(s.shopId(), "retry-key-12345", NEAR_ADDRESS, item(s.rowId(), 3)));
+        assertEquals(409, changed.status(), changed.body());
         assertEquals(6, stockOf(s.shop(), s.rowId()), "stock is taken once, not twice");
         assertEquals(1, get("/api/orders", customer).<Integer>read("$.page.totalElements"));
 
         Res other = post("/api/orders", customer(), body);
         assertEquals(201, other.status(), "the key only repeats per customer: " + other.body());
+    }
+
+    @Test
+    void cartsAboveTheMaximumTotalCannotTakeStock() {
+        String admin = adminToken();
+        Stocked s = stockedShop(admin, 1_000_000, 99);
+        String[] lines = new String[15];
+        lines[0] = item(s.rowId(), 99);
+        for (int i = 1; i < lines.length; i++) {
+            lines[i] = item(addStock(s.shop(), admin, 1_000_000, 99), 99);
+        }
+        String customer = customer();
+        String body = orderJsonWith(s.shopId(), "large-cart-key", NEAR_ADDRESS, lines);
+        Res quote = post("/api/orders/quote", customer, body.replace("\"idempotencyKey\":\"large-cart-key\",", ""));
+        assertEquals(400, quote.status(), quote.body());
+        Res placement = post("/api/orders", customer, body);
+        assertEquals(400, placement.status(), placement.body());
+        assertEquals(99, stockOf(s.shop(), s.rowId()));
+        assertEquals(0, get("/api/orders", customer).<Integer>read("$.page.totalElements"));
+    }
+
+    @Test
+    void quoteAndCheckoutRejectAListingRemovedFromTheApprovedCatalog() {
+        String admin = adminToken();
+        Stocked s = stockedShop(admin, 1000, 10);
+        long productId = approvedProduct(admin);
+        long listingId = post("/api/shops/me/products", s.shop(), addJson(productId, 500, 10)).id();
+        String customer = customer();
+        String body = orderJsonWith(s.shopId(), "stale-catalog-key", NEAR_ADDRESS, item(s.rowId(), 1), item(listingId, 1));
+        String quoteBody = body.replace("\"idempotencyKey\":\"stale-catalog-key\",", "");
+        assertEquals(200, post("/api/orders/quote", customer, quoteBody).status());
+        assertEquals(200, put("/api/admin/catalog/" + productId, admin, """
+                {"name":"Withdrawn product","category":"Pantry","taxCategory":"TAXABLE","status":"REJECTED"}
+                """).status());
+
+        for (Res response : List.of(post("/api/orders/quote", customer, quoteBody), post("/api/orders", customer, body))) {
+            assertEquals(409, response.status(), response.body());
+            assertEquals(listingId, response.<Number>read("$.shopProductId").longValue());
+        }
+        assertEquals(10, stockOf(s.shop(), s.rowId()), "the earlier line was rolled back");
+        assertEquals(10, stockOf(s.shop(), listingId));
     }
 
     @Test

@@ -1,36 +1,39 @@
 package com.quickcommerce.order;
 
-import com.quickcommerce.auth.Throttle;
 import com.quickcommerce.auth.User;
 import com.quickcommerce.auth.UserRepository;
 import com.quickcommerce.catalog.ShopProductView;
 import com.quickcommerce.catalog.StockService;
+import com.quickcommerce.common.DatabaseTime;
 import com.quickcommerce.common.Geo;
-import com.quickcommerce.common.Settings;
 import com.quickcommerce.common.Paging;
+import com.quickcommerce.common.Settings;
 import com.quickcommerce.order.Order.Status;
 import com.quickcommerce.order.OrderViews.AdminOrderView;
 import com.quickcommerce.order.OrderViews.CustomerOrderView;
 import com.quickcommerce.order.OrderViews.ShopOrderView;
+import com.quickcommerce.payment.OrderPayments;
 import com.quickcommerce.shop.Shop;
 import com.quickcommerce.shop.ShopService;
-import com.quickcommerce.work.CodeTriesUsed;
 import com.quickcommerce.work.DriverWork;
+import jakarta.persistence.criteria.Predicate;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalTime;
-import java.time.ZoneId;
-import jakarta.persistence.criteria.Predicate;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.stream.Collectors;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
@@ -39,12 +42,14 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.ProblemDetail;
-import org.springframework.web.ErrorResponseException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.server.ResponseStatusException;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Every order rule lives here: placing, pricing, and each status change.
@@ -53,12 +58,9 @@ import org.springframework.web.server.ResponseStatusException;
 @Service
 public class OrderService {
 
-    /**
-     * ponytail: until payment exists, an order costs nothing to place, so this
-     * cap is the only brake on one customer reserving a shop's whole stock.
-     * Revisit when the card hold is in.
-     */
     static final int MAX_UNANSWERED_ORDERS_PER_CUSTOMER = 3;
+    private static final long MAX_ORDER_TOTAL_CENTS = Integer.MAX_VALUE;
+    private static final int EXPIRY_BATCH_SIZE = 200;
 
     public record Placed(CustomerOrderView order, boolean created) {}
 
@@ -76,8 +78,8 @@ public class OrderService {
      * What an order would cost if placed now, fee by fee, without placing it.
      * The thresholds let the app say "add $X for free delivery" or "add $X to skip the small-cart fee".
      */
-    public record Quote(Long shopId, List<QuoteLine> items, int subtotalCents, int deliveryFeeCents, int handlingFeeCents,
-            int smallCartFeeCents, int lateNightFeeCents, int surgeFeeCents, int tipCents, int totalCents,
+    public record Quote(Long shopId, List<QuoteLine> items, long subtotalCents, int deliveryFeeCents, int handlingFeeCents,
+            int smallCartFeeCents, int lateNightFeeCents, int surgeFeeCents, int tipCents, long totalCents,
             int smallCartBelowCents, int deliveryMidFromCents, int freeDeliveryFromCents, List<Integer> tipOptionsCents) {}
 
     /** Orders that can no longer take a tip. */
@@ -90,8 +92,9 @@ public class OrderService {
     static final List<Status> WAITING_FOR_PICKUP = List.of(Status.ACCEPTED, Status.READY);
     static final List<Status> WITH_A_DRIVER = List.of(Status.ACCEPTED, Status.READY, Status.PICKED_UP);
     /** Not finished yet: admin can still cancel these. */
-    static final List<Status> ACTIVE = List.of(Status.PLACED, Status.ACCEPTED, Status.READY, Status.PICKED_UP);
+    static final List<Status> ACTIVE = List.of(Status.PAYMENT_PENDING, Status.PLACED, Status.ACCEPTED, Status.READY, Status.PICKED_UP);
     static final int DELIVERY_CODE_TRIES = 5;
+    private static final Duration DELIVERY_CODE_WINDOW = Duration.ofMinutes(15);
 
     private static final SecureRandom RANDOM = new SecureRandom();
 
@@ -102,13 +105,17 @@ public class OrderService {
     private final Pricing pricing;
     private final double maxDistanceKm;
     private final Duration acceptTimeout;
-    private final Throttle throttle;
     private final UserRepository users;
     private final DriverWork work;
     private final SurgeCheck surge;
+    private final JsonMapper json;
+    private final DatabaseTime time;
+    private final TransactionTemplate expiryTransaction;
+    private final OrderPayments payments;
 
     OrderService(OrderRepository orders, OrderItemRepository items, StockService stock, ShopService shops,
-            Pricing pricing, Throttle throttle, UserRepository users, DriverWork work, SurgeCheck surge,
+            Pricing pricing, UserRepository users, DriverWork work, SurgeCheck surge, JsonMapper json,
+            DatabaseTime time, OrderPayments payments, PlatformTransactionManager transactionManager,
             @Value("${app.orders.max-distance-km}") double maxDistanceKm,
             @Value("${app.orders.accept-timeout}") Duration acceptTimeout) {
         this.orders = orders;
@@ -116,12 +123,16 @@ public class OrderService {
         this.stock = stock;
         this.shops = shops;
         this.pricing = pricing;
-        this.throttle = throttle;
         this.users = users;
         this.work = work;
         this.surge = surge;
         this.maxDistanceKm = maxDistanceKm;
         this.acceptTimeout = acceptTimeout;
+        this.json = json;
+        this.time = time;
+        this.payments = payments;
+        this.expiryTransaction = new TransactionTemplate(transactionManager);
+        this.expiryTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
     // ------------------------------------------------------------ placing
@@ -136,11 +147,21 @@ public class OrderService {
     @Transactional
     public Placed place(Long customerId, Long shopId, String idempotencyKey, Map<Long, Integer> quantities,
             DeliveryAddress address, String note, int tipCents) {
+        // One customer cannot create orders in parallel past the unanswered-order limit.
+        User customer = users.findWithLockById(customerId)
+                .filter(u -> !u.isDisabled())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED));
+        String cleanNote = note == null || note.isBlank() ? null : note.trim();
+        String fingerprint = fingerprint(shopId, quantities, address, cleanNote, tipCents);
         var replay = orders.findByCustomerIdAndIdempotencyKey(customerId, idempotencyKey);
         if (replay.isPresent()) {
-            return new Placed(customerView(replay.get()), false);
+            Order existing = replay.get();
+            if (existing.getCheckoutFingerprint() != null && !existing.getCheckoutFingerprint().equals(fingerprint)) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "This checkout key was used for a different order");
+            }
+            return new Placed(customerView(existing), false);
         }
-        if (orders.countByCustomerIdAndStatus(customerId, Status.PLACED) >= MAX_UNANSWERED_ORDERS_PER_CUSTOMER) {
+        if (orders.countByCustomerIdAndStatusIn(customerId, List.of(Status.PAYMENT_PENDING, Status.PLACED, Status.CAPTURE_PENDING)) >= MAX_UNANSWERED_ORDERS_PER_CUSTOMER) {
             throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS,
                     "You have orders waiting for a shop to answer. Try again once they are answered.");
         }
@@ -149,22 +170,25 @@ public class OrderService {
         requireTipOption(tipCents, prices);
 
         List<ShopProductView> reserved = stock.reserve(shopId, quantities);
-        int subtotal = reserved.stream()
-                .mapToInt(p -> quantities.get(p.id()) * prices.customerPrice(p.priceCents(), p.category())).sum();
+        long subtotal = reserved.stream()
+                .mapToLong(p -> (long) quantities.get(p.id()) * prices.customerPrice(p.priceCents(), p.category())).sum();
         Fees fees = fees(prices, shop, subtotal);
+        requireAllowedTotal(subtotal + fees.total() + tipCents);
+        payments.validateAmount(subtotal + fees.total() + tipCents);
 
         Order order = new Order();
-        order.setCustomerId(customerId);
+        order.setCustomerId(customer.getId());
         order.setShopId(shopId);
         order.setIdempotencyKey(idempotencyKey);
-        order.setStatus(Status.PLACED);
+        order.setCheckoutFingerprint(fingerprint);
+        order.setStatus(payments.enabled() ? Status.PAYMENT_PENDING : Status.PLACED);
         order.setAddressLine(address.addressLine().trim());
         order.setCity(address.city().trim());
         order.setProvince(address.province());
-        order.setPostalCode(address.postalCode().toUpperCase());
+        order.setPostalCode(address.postalCode().toUpperCase(Locale.ROOT));
         order.setLatitude(address.latitude());
         order.setLongitude(address.longitude());
-        order.setNote(note == null || note.isBlank() ? null : note.trim());
+        order.setNote(cleanNote);
         order.setDeliveryFeeCents(fees.delivery());
         order.setHandlingFeeCents(fees.handling());
         order.setSmallCartFeeCents(fees.smallCart());
@@ -188,7 +212,9 @@ public class OrderService {
             lines.add(line);
         }
         items.saveAll(lines);
-        // ponytail: the card hold goes here when the payment part exists.
+        if (payments.enabled()) {
+            payments.open(order.getId(), subtotal + fees.total() + tipCents);
+        }
         return new Placed(customerView(order), true);
     }
 
@@ -198,25 +224,21 @@ public class OrderService {
         Shop shop = requireOrderable(shopId, address);
         Pricing.Prices prices = pricing.current();
         requireTipOption(tipCents, prices);
-        Map<Long, ShopProductView> found = stock.peek(shopId, quantities.keySet()).stream()
-                .collect(Collectors.toMap(ShopProductView::id, p -> p));
         List<QuoteLine> lines = new ArrayList<>();
-        int subtotal = 0;
-        for (var wanted : quantities.entrySet()) {
-            ShopProductView p = found.get(wanted.getKey());
-            if (p == null) {
-                ProblemDetail body = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, "Product is not sold by this shop");
-                body.setProperty("shopProductId", wanted.getKey());
-                throw new ErrorResponseException(HttpStatus.BAD_REQUEST, body, null);
-            }
+        long subtotal = 0;
+        for (ShopProductView p : stock.peek(shopId, quantities.keySet())) {
+            int quantity = quantities.get(p.id());
             int unit = prices.customerPrice(p.priceCents(), p.category());
-            lines.add(new QuoteLine(p.id(), p.productId(), p.name(), wanted.getValue(), unit, p.quantity() >= wanted.getValue()));
-            subtotal += unit * wanted.getValue();
+            lines.add(new QuoteLine(p.id(), p.productId(), p.name(), quantity, unit, p.quantity() >= quantity));
+            subtotal += (long) unit * quantity;
         }
         Fees fees = fees(prices, shop, subtotal);
+        long total = subtotal + fees.total() + tipCents;
+        requireAllowedTotal(total);
+        payments.validateAmount(total);
         Settings.Values s = prices.settings();
         return new Quote(shopId, lines, subtotal, fees.delivery(), fees.handling(), fees.smallCart(), fees.lateNight(),
-                fees.surge(), tipCents, subtotal + fees.total() + tipCents,
+                fees.surge(), tipCents, total,
                 s.smallCartBelowCents(), s.deliveryMidFromCents(), s.freeDeliveryFromCents(), s.tipOptionsCents());
     }
 
@@ -235,11 +257,28 @@ public class OrderService {
         return shop;
     }
 
-    private Fees fees(Pricing.Prices prices, Shop shop, int subtotalCents) {
+    private Fees fees(Pricing.Prices prices, Shop shop, long subtotalCents) {
         Settings.Values s = prices.settings();
-        boolean lateNight = s.isLateNight(LocalTime.now(ZoneId.of(shop.getTimeZone())));
+        boolean lateNight = s.isLateNight(time.localNow(shop.getTimeZone()).toLocalTime());
         return new Fees(s.deliveryFee(subtotalCents), s.handlingFeeCents(), s.smallCartFee(subtotalCents),
                 lateNight ? s.lateNightFeeCents() : 0, surge.isActive(shop, s) ? s.surgeFeeCents() : 0);
+    }
+
+    private static void requireAllowedTotal(long total) {
+        if (total > MAX_ORDER_TOTAL_CENTS) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Order total exceeds the maximum allowed amount");
+        }
+    }
+
+    private String fingerprint(Long shopId, Map<Long, Integer> quantities, DeliveryAddress address, String note, int tipCents) {
+        byte[] request = json.writeValueAsBytes(List.of(shopId, new TreeMap<>(quantities), address.addressLine().trim(),
+                address.city().trim(), address.province(), address.postalCode().replace(" ", "").toUpperCase(Locale.ROOT),
+                address.latitude(), address.longitude(), note == null ? "" : note, tipCents));
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(request));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private static void requireTipOption(int tipCents, Pricing.Prices prices) {
@@ -257,16 +296,44 @@ public class OrderService {
      */
     @Transactional
     public CustomerOrderView tip(Long customerId, Long orderId, int tipCents) {
-        forCustomer(customerId, orderId);
+        Order order = forCustomer(customerId, orderId);
+        if (payments.exists(orderId)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Start a Stripe checkout to add a tip after delivery");
+        }
         if (tipCents == 0) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "tipCents must not be 0");
         }
         requireTipOption(tipCents, pricing.current());
+        if (order.getTipCents() == 0) {
+            long subtotal = OrderViews.subtotal(items.findByOrderIdInOrderById(List.of(orderId)));
+            requireAllowedTotal(subtotal + order.feesCents() + tipCents);
+        }
         if (orders.tip(orderId, customerId, tipCents, CLOSED, Instant.now().minus(AFTER_DELIVERY_WINDOW)) == 0) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "This order already has a tip, was not delivered, or was delivered over 24 hours ago");
         }
         return customerView(forCustomer(customerId, orderId));
+    }
+
+    @Transactional
+    public OrderPayments.CustomerPayment checkoutTip(long customerId, long orderId, int cents) {
+        if (!payments.enabled()) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Stripe payments are disabled");
+        }
+        Order order = orders.findWithLockById(orderId).filter(o -> o.getCustomerId() == customerId)
+                .orElseThrow(OrderService::notFound);
+        if (order.getStatus() != Status.DELIVERED || !payments.orderCaptured(orderId)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "A delivered order with a captured payment is required");
+        }
+        var replay = payments.existingTip(orderId, customerId, cents);
+        if (replay.isPresent()) {
+            return replay.get();
+        }
+        if (order.getTipCents() != 0) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "An order can be tipped only once");
+        }
+        requireTipOption(cents, pricing.current());
+        return payments.openTip(orderId, customerId, cents, order.getDeliveredAt().plus(AFTER_DELIVERY_WINDOW));
     }
 
     /**
@@ -288,16 +355,34 @@ public class OrderService {
         return customerView(forCustomer(customerId, orderId));
     }
 
+    // Payment worker calls these with the order row locked in its finalization transaction.
+    public void confirmAuthorization(long orderId, Instant authorizedAt) {
+        orders.authorizePayment(orderId, Status.PAYMENT_PENDING, Status.PLACED, authorizedAt);
+    }
+
+    public void confirmCapture(long orderId) {
+        move(orderId, Status.CAPTURE_PENDING, Status.ACCEPTED);
+    }
+
+    public void expirePaymentOrder(Order order, Status from) {
+        if (orders.move(order.getId(), from, Status.EXPIRED) == 1) {
+            restoreStock(order);
+            payments.close(order.getId());
+        }
+    }
+
     // ----------------------------------------------------- status changes
 
     /** Customer changes their mind. Only possible while the shop has not answered. */
     @Transactional
     public CustomerOrderView cancel(Long customerId, Long orderId) {
         Order order = forCustomer(customerId, orderId);
-        if (orders.cancel(orderId, Status.PLACED, Status.CANCELLED, null) == 0) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Order is not PLACED any more");
+        if ((order.getStatus() != Status.PAYMENT_PENDING && order.getStatus() != Status.PLACED)
+                || orders.cancel(orderId, order.getStatus(), Status.CANCELLED, null) == 0) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "The order is no longer waiting for payment or shop acceptance");
         }
         restoreStock(order);
+        payments.close(orderId);
         return customerView(forCustomer(customerId, orderId));
     }
 
@@ -308,7 +393,7 @@ public class OrderService {
      */
     @Transactional
     public ShopOrderView accept(Long shopId, Long orderId, Set<Long> unavailableItemIds) {
-        forShop(shopId, orderId);
+        Order order = forShop(shopId, orderId);
         List<OrderItem> lines = items.findByOrderIdInOrderById(List.of(orderId));
         Set<Long> lineIds = lines.stream().map(OrderItem::getId).collect(Collectors.toSet());
         if (!lineIds.containsAll(unavailableItemIds)) {
@@ -317,14 +402,20 @@ public class OrderService {
         if (unavailableItemIds.size() == lines.size()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Every item is unavailable: reject the order instead");
         }
-        move(orderId, Status.PLACED, Status.ACCEPTED);
+        boolean paidOrder = payments.exists(orderId);
+        move(orderId, Status.PLACED, paidOrder ? Status.CAPTURE_PENDING : Status.ACCEPTED);
+        if (paidOrder) {
+            long subtotal = lines.stream().filter(line -> !unavailableItemIds.contains(line.getId()))
+                    .mapToLong(line -> (long) line.getQuantity() * line.getCustomerPriceCents()).sum();
+            payments.capture(orderId, subtotal + order.feesCents() + order.getTipCents());
+        }
         if (!unavailableItemIds.isEmpty()) {
             items.markUnavailable(orderId, unavailableItemIds);
             lines.stream()
                     .filter(line -> unavailableItemIds.contains(line.getId()) && line.getShopProductId() != null)
+                    .sorted(Comparator.comparing(OrderItem::getShopProductId))
                     .forEach(line -> stock.markOutOfStock(shopId, line.getShopProductId()));
         }
-        // ponytail: the card is charged here (for available items only) when the payment part exists.
         return shopView(forShop(shopId, orderId));
     }
 
@@ -334,6 +425,7 @@ public class OrderService {
         Order order = forShop(shopId, orderId);
         move(orderId, Status.PLACED, Status.REJECTED);
         restoreStock(order);
+        payments.close(orderId);
         return shopView(forShop(shopId, orderId));
     }
 
@@ -413,23 +505,31 @@ public class OrderService {
      * Ends the delivery. The driver must give the code only the customer has,
      * so an order cannot be marked delivered from somewhere else. Returns the order id.
      */
-    @Transactional(noRollbackFor = CodeTriesUsed.class)
+    @Transactional(noRollbackFor = DeliveryCodeRejection.class)
     public Long deliver(Long driverId, String code, Double driverLat, Double driverLng) {
-        Order order = requireActiveDelivery(driverId);
+        Order order = orders.findFirstWithLockByDriverIdAndStatusIn(driverId, WITH_A_DRIVER)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "You have no active delivery"));
         if (order.getStatus() != Status.PICKED_UP) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Pick the order up first");
         }
-        // Counted before checking, so parallel guesses cannot beat the limit: 5 tries at 10,000 codes.
-        if (!throttle.tryAcquire("deliver:" + order.getId(), DELIVERY_CODE_TRIES, Duration.ofMinutes(15), Instant.now())) {
-            work.codeTriesUsed(order.getId());
-            throw new CodeTriesUsed();
+        // The order lock serializes attempts, and the database clock is shared by all replicas.
+        Instant now = time.instant();
+        Instant expiresAt = order.getDeliveryCodeWindowExpiresAt();
+        if (expiresAt == null || !expiresAt.isAfter(now)) {
+            order.setDeliveryCodeAttempts(0);
+            order.setDeliveryCodeWindowExpiresAt(now.plus(DELIVERY_CODE_WINDOW));
         }
+        if (order.getDeliveryCodeAttempts() >= DELIVERY_CODE_TRIES) {
+            work.codeTriesUsed(order.getId());
+            throw DeliveryCodeRejection.triesUsed();
+        }
+        order.setDeliveryCodeAttempts(order.getDeliveryCodeAttempts() + 1);
         boolean matches = MessageDigest.isEqual(
                 order.getDeliveryCode().getBytes(StandardCharsets.UTF_8), code.getBytes(StandardCharsets.UTF_8));
         if (!matches) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Wrong delivery code");
+            throw DeliveryCodeRejection.wrongCode();
         }
-        if (orders.deliver(order.getId(), driverId, Instant.now(), Status.PICKED_UP, Status.DELIVERED) == 0) {
+        if (orders.deliver(order.getId(), driverId, now, Status.PICKED_UP, Status.DELIVERED) == 0) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "This order is already delivered");
         }
         boolean locationLost = work.end(order.getId(), DriverWork.EndReason.DELIVERED)
@@ -440,7 +540,6 @@ public class OrderService {
         if (locationLost || farFromDoor) {
             orders.askReceipt(order.getId());
         }
-        // ponytail: the shop payout and driver pay are released here when the payment part exists.
         return order.getId();
     }
 
@@ -478,21 +577,37 @@ public class OrderService {
      * at once: move() lets only one of them win each order.
      */
     @Scheduled(fixedDelayString = "${app.orders.expiry-check-ms}")
-    @Transactional
     public void expireOverdue() {
         expirePlacedBefore(Instant.now().minus(acceptTimeout));
+        for (Long orderId : payments.expiredUnpaid()) {
+            expiryTransaction.executeWithoutResult(tx ->
+                    orders.findWithLockById(orderId).ifPresent(order -> expirePaymentOrder(order, Status.PAYMENT_PENDING)));
+        }
     }
 
-    @Transactional
     public int expirePlacedBefore(Instant cutoff) {
         int expired = 0;
-        for (Order order : orders.findTop200ByStatusAndCreatedAtBeforeOrderById(Status.PLACED, cutoff)) {
+        ExpiryBatch batch;
+        do {
+            batch = expiryTransaction.execute(status -> expireBatch(cutoff));
+            expired += batch.expired();
+        } while (batch.found() == EXPIRY_BATCH_SIZE);
+        return expired;
+    }
+
+    private record ExpiryBatch(int found, int expired) {}
+
+    private ExpiryBatch expireBatch(Instant cutoff) {
+        List<Order> batch = orders.findTop200ByStatusAndCreatedAtBeforeOrderById(Status.PLACED, cutoff);
+        Map<Long, Long> expired = new HashMap<>();
+        for (Order order : batch) {
             if (orders.move(order.getId(), Status.PLACED, Status.EXPIRED) == 1) {
-                restoreStock(order);
-                expired++;
+                expired.put(order.getId(), order.getShopId());
             }
         }
-        return expired;
+        restoreStock(expired);
+        expired.keySet().stream().sorted().forEach(payments::close);
+        return new ExpiryBatch(batch.size(), expired.size());
     }
 
     /** Throws 409 when the order is not in the status the action needs (someone else got there first). */
@@ -509,10 +624,15 @@ public class OrderService {
      * does not have them, and their stock was already set to zero.
      */
     private void restoreStock(Order order) {
-        for (OrderItem line : items.findByOrderIdInOrderById(List.of(order.getId()))) {
-            if (line.getShopProductId() != null && !line.isUnavailable()) {
-                stock.restore(order.getShopId(), line.getShopProductId(), line.getQuantity());
-            }
+        restoreStock(Map.of(order.getId(), order.getShopId()));
+    }
+
+    private void restoreStock(Map<Long, Long> shopByOrderId) {
+        if (!shopByOrderId.isEmpty()) {
+            items.findByOrderIdInOrderById(shopByOrderId.keySet()).stream()
+                    .filter(line -> line.getShopProductId() != null && !line.isUnavailable())
+                    .sorted(Comparator.comparing(OrderItem::getShopProductId))
+                    .forEach(line -> stock.restore(shopByOrderId.get(line.getOrderId()), line.getShopProductId(), line.getQuantity()));
         }
     }
 
@@ -537,7 +657,7 @@ public class OrderService {
         if (order.getStatus() != Status.PICKED_UP) {
             restoreStock(order);
         }
-        // ponytail: the customer's refund goes here when the payment part exists.
+        payments.close(orderId);
         return getForAdmin(orderId);
     }
 
@@ -649,8 +769,11 @@ public class OrderService {
     @Transactional(readOnly = true)
     public Page<ShopOrderView> listForShop(Long shopId, Status status, int page, int size) {
         Pageable pageable = newestFirst(page, size);
+        if (status == Status.PAYMENT_PENDING) {
+            return Page.empty(pageable);
+        }
         Page<Order> found = status == null
-                ? orders.findByShopId(shopId, pageable)
+                ? orders.findByShopIdAndStatusNot(shopId, Status.PAYMENT_PENDING, pageable)
                 : orders.findByShopIdAndStatus(shopId, status, pageable);
         Map<Long, List<OrderItem>> lines = linesOf(found.getContent());
         return found.map(o -> OrderViews.shop(o, lines.getOrDefault(o.getId(), List.of())));
@@ -666,7 +789,8 @@ public class OrderService {
     }
 
     private Order forShop(Long shopId, Long orderId) {
-        return orders.findByIdAndShopId(orderId, shopId).orElseThrow(OrderService::notFound);
+        return orders.findByIdAndShopId(orderId, shopId).filter(o -> o.getStatus() != Status.PAYMENT_PENDING)
+                .orElseThrow(OrderService::notFound);
     }
 
     private static ResponseStatusException notFound() {

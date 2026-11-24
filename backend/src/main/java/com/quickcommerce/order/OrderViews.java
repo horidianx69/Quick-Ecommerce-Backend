@@ -26,14 +26,14 @@ public final class OrderViews {
             String shopName,
             Order.Status status,
             List<Line> items,
-            int subtotalCents,
+            long subtotalCents,
             int deliveryFeeCents,
             int handlingFeeCents,
             int smallCartFeeCents,
             int lateNightFeeCents,
             int surgeFeeCents,
             int tipCents,
-            int totalCents,
+            long totalCents,
             DeliveryAddress address,
             String note,
             Instant createdAt,
@@ -49,7 +49,7 @@ public final class OrderViews {
             Long id,
             Order.Status status,
             List<Line> items,
-            int payoutCents,
+            long payoutCents,
             String note,
             Instant createdAt,
             boolean driverAssigned,
@@ -76,18 +76,18 @@ public final class OrderViews {
             Party customer,
             Party driver,
             List<AdminLine> items,
-            int subtotalCents,
+            long subtotalCents,
             int deliveryFeeCents,
             int handlingFeeCents,
             int smallCartFeeCents,
             int lateNightFeeCents,
             int surgeFeeCents,
             int tipCents,
-            int totalCents,
-            int shopPayoutCents,
-            int itemMarginCents,
+            long totalCents,
+            long shopPayoutCents,
+            long itemMarginCents,
             int driverPayCents,
-            int platformNetCents,
+            long platformNetCents,
             DeliveryAddress address,
             String note,
             String cancelReason,
@@ -98,7 +98,7 @@ public final class OrderViews {
     // ponytail: no sales tax in the totals yet. Rates and which items are taxed
     // depend on the launch province, which is still undecided.
     static CustomerOrderView customer(Order o, String shopName, List<OrderItem> items, String driverName) {
-        int subtotal = subtotal(items);
+        long subtotal = subtotal(items);
         return new CustomerOrderView(o.getId(), o.getShopId(), shopName, o.getStatus(),
                 items.stream().map(i -> line(i, i.getCustomerPriceCents())).toList(),
                 subtotal, o.getDeliveryFeeCents(), o.getHandlingFeeCents(), o.getSmallCartFeeCents(),
@@ -116,8 +116,8 @@ public final class OrderViews {
 
     static AdminOrderView admin(Order o, String shopName, Map<Long, String> userNames, List<OrderItem> items,
             int driverPayCents) {
-        int subtotal = subtotal(items);
-        int payout = payout(items);
+        long subtotal = subtotal(items);
+        long payout = payout(items);
         return new AdminOrderView(o.getId(), o.getStatus(), o.getCreatedAt(), o.getDeliveredAt(),
                 new Party(o.getShopId(), shopName),
                 new Party(o.getCustomerId(), userNames.get(o.getCustomerId())),
@@ -131,12 +131,12 @@ public final class OrderViews {
                 address(o), o.getNote(), o.getCancelReason(), o.getReceiptStatus());
     }
 
-    private static int subtotal(List<OrderItem> items) {
-        return items.stream().filter(i -> !i.isUnavailable()).mapToInt(i -> i.getQuantity() * i.getCustomerPriceCents()).sum();
+    static long subtotal(List<OrderItem> items) {
+        return items.stream().filter(i -> !i.isUnavailable()).mapToLong(i -> (long) i.getQuantity() * i.getCustomerPriceCents()).sum();
     }
 
-    private static int payout(List<OrderItem> items) {
-        return items.stream().filter(i -> !i.isUnavailable()).mapToInt(i -> i.getQuantity() * i.getShopPriceCents()).sum();
+    private static long payout(List<OrderItem> items) {
+        return items.stream().filter(i -> !i.isUnavailable()).mapToLong(i -> (long) i.getQuantity() * i.getShopPriceCents()).sum();
     }
 
     private static DeliveryAddress address(Order o) {

@@ -16,7 +16,8 @@ This repository holds the whole platform:
 - [How to start the project](#how-to-start-the-project)
 - [Deploying](#deploying)
 - [Configuration](#configuration)
-- [Tests](#tests)
+- [Stripe payments](#stripe-payments)
+- [Tests and remaining verification](#tests)
 
 ---
 
@@ -41,7 +42,7 @@ Prices work like this (admin can change every number):
 
 ## Project status
 
-The backend and the web app are built for all four roles, and a full order has been run through the app end to end. Both are ready to deploy. Three features wait on outside decisions (payments, sales tax, password reset), and one thing needs doing before a public launch (see [Before launch](#left)). The web app still needs updating for the pricing and pay changes (see [API changes for the web app](#api-changes-for-the-web-app)).
+QuikE serves independent Canadian shops, customers, drivers and admins. This backend release adds CAD payments, payment recovery and settlement, along with security and concurrency hardening. The React app needs the [payment integration](#payments-frontend-handoff) and the [pricing and pay updates](#api-changes-for-the-web-app) for a paid checkout pilot.
 
 ### Done
 
@@ -59,7 +60,9 @@ The backend and the web app are built for all four roles, and a full order has b
 | Driver rules | Violations (late delivery, lost location, "not received", giving jobs back, guessing the code); daily warning and 30-day ban review for admin; "Did you receive your order?" for suspicious deliveries |
 | Reviews | Customers rate the shop, rider and products; riders rate the shop and customer; averages shown while browsing |
 | Admin | Dashboard, daily charts data, order board, cancel, assign drivers by hand, every price, fee, pay and violation setting, driver alerts, pay periods, reviews |
-| Production basics | Health check, rate limits, overload protection, security tests, race tests, load tests |
+| Payments | Stripe Checkout card authorization, adjusted capture after shop acceptance, voids and cancellation refunds, separate post-delivery tips, and admin-triggered Stripe Connect transfers |
+| Payment recovery | PostgreSQL worker claims, Stripe idempotency keys, bounded retries, and admin review when a payment or transfer remains unresolved |
+| Security and concurrency | Request and checkout limits, stock and order race protection, idempotency key validation, delivery-code throttling, HS256 token verification and security headers |
 | Web app (`frontend/`) | Landing page; customer shopping, checkout, orders and live tracking; shop orders, products and profile; rider jobs, pickup and delivery; full admin console. Sign-up for riders and shop owners with a "pending review" screen until approved |
 
 ### Left
@@ -68,13 +71,15 @@ The backend and the web app are built for all four roles, and a full order has b
 
 | Item | Why |
 |---|---|
-| Map tiles from a paid provider (MapTiler, Stadia or Mapbox; all have free tiers) | The web app loads maps straight from OpenStreetMap's free servers, whose rules don't allow production apps |
+| Frontend integration | Wire the [payment screens and states](#payments-frontend-handoff) and walk a paid order through every role. |
+| Stripe Connect verification | Enable Connect in the sandbox and verify a shop transfer and a driver-period transfer against Stripe. |
+| Staging verification | Run through the deployed proxy, database and worker configuration using the [test checklist](#remaining-testing-before-launch). |
+| Map tile service | Set up the production map provider and verify usage limits. |
 
 **Waiting on a decision**
 
 | Feature | Needs |
 |---|---|
-| Payments: hold the card, charge, refund, pay out shops and drivers | A Stripe account. The places in the code are marked in `OrderService`. |
 | Sales tax in order totals | The launch province. Each product already has a tax category. |
 | Password reset | An email provider |
 
@@ -88,13 +93,14 @@ The backend and the web app are built for all four roles, and a full order has b
 - **Phone login for customers.** Needs an SMS provider. Customers use email and password for now, so drivers have no customer phone number to call.
 - **Refresh tokens.** Logins last 12 hours.
 - **Multi-shop carts.** One order goes to one shop.
+- **Barcode-assisted product entry.** Shops currently register and list products manually.
 
 **Next steps**
 
 | Step | Status |
 |---|---|
-| Deployment | Ready: pick a host, then follow [Deploying](#deploying) |
-| Pilot with 3 to 5 shops and your own riders | After deployment |
+| Staging deployment | Follow [Deploying](#deploying) and start with Stripe sandbox credentials. |
+| Pilot with 3 to 5 shops and your own riders | After frontend integration, sandbox transfer verification and staging tests. |
 | Phone apps in the App Store and Google Play | Not built. Customers and riders use the web app in their phone's browser for now |
 
 ---
@@ -133,7 +139,7 @@ backend/
     common/     security setup, error format, paging, geo helpers
   src/main/resources/
     application.properties      settings (see Configuration)
-    db/migration/V1..V5.sql     database tables, applied by Flyway at startup
+    db/migration/              database schema, applied by Flyway at startup
   src/test/java/com/quickcommerce/
     *Test.java                  tests, run against a real Postgres
     DevApplication.java         starts the app locally with a throwaway database
@@ -193,23 +199,23 @@ Nobody can sign up as admin. A new shop or driver can do nothing useful until ad
 
 ### The life of an order
 
+With Stripe enabled:
+
 ```
-PLACED ──► ACCEPTED ──► READY ──► PICKED_UP ──► DELIVERED
-   │
-   ├──► REJECTED   (shop said no)
-   ├──► CANCELLED  (customer cancelled before the shop answered, or admin cancelled any time before delivery)
-   └──► EXPIRED    (shop did not answer within 10 minutes)
+PAYMENT_PENDING → PLACED → CAPTURE_PENDING → ACCEPTED → READY → PICKED_UP → DELIVERED
 ```
+
+The customer can cancel in `PAYMENT_PENDING` or `PLACED`. A shop can reject a `PLACED` order. Unpaid orders and orders the shop leaves unanswered can expire. The development flow with Stripe disabled starts at `PLACED` and goes straight to `ACCEPTED` after shop acceptance.
 
 1. **Customer places an order.** The backend works out every price itself. Stock is taken in the same database step that creates the order, so two customers can never buy the last item.
 2. **Shop accepts or rejects.** It can mark items it turns out not to have; those are not charged and not paid out. Rejecting, cancelling or expiring puts the stock back.
-3. **A driver takes the job.** Jobs open as soon as the shop accepts, so the driver travels while the shop packs.
+3. **A driver takes the job.** A paid job opens once capture succeeds and the order reaches `ACCEPTED`. The driver can travel while the shop packs.
 4. **Shop marks it ready, driver picks it up.**
 5. **At the door,** the customer reads a 4-digit code from their app. The driver enters it to finish the delivery.
 
 Each step works only from the step before. Steps cannot be skipped or done twice.
 
-Admin can step in at any point before delivery: cancel the order with a reason (stock goes back unless it was already picked up), or give it to a driver by hand.
+Admins can cancel unfinished orders outside `CAPTURE_PENDING` or assign a driver before pickup. Cancellation restores remaining stock before pickup. During `CAPTURE_PENDING`, wait for the payment to resolve before attempting another action.
 
 ### Prices
 
@@ -239,7 +245,7 @@ If rounding down would put the customer price at or below the shop's payout (onl
 
 - **Engaged time:** from accepting a job until it ends (delivered, given back, taken off them, or cancelled), including the trip to the shop and waiting there. This is what BC's and Ontario's rules for app-based delivery work count.
 - **Rate:** engaged hours × **$21.99** plus **$0.35 per km**. Km are the straight-line distance from where the driver accepted to the shop, then to the door, ×1.3 for roads.
-- **Pay periods:** two weeks, starting Tuesday 1 December 2026, paid on the Tuesday after each period. Drivers see a statement per period (hours, km, pay, tips); admin sees every driver's and marks each one paid. Bank transfers happen outside the app until payments are built.
+- **Pay periods:** two weeks, starting Tuesday 1 December 2026, paid on the Tuesday after each period. Drivers see a statement per period (hours, km, pay, tips); admin sees every driver's and marks each one paid. With Stripe enabled, an admin queues the finished period for a transfer to the driver’s Stripe Connect balance.
 - **Check before launch:** BC's minimum is $21.89 an hour of engaged time (from 1 June 2026, rising each June) plus $0.35/km. Confirm the current rules for your launch province with an employment lawyer or accountant.
 
 ### Driver rules
@@ -311,11 +317,11 @@ A placed order keeps its prices and fees forever, so a change never alters a pas
 
 ### Safe under load
 
-- **Stock** only changes through single database statements that refuse to go below zero. Tested with 40 customers racing for 10 items: exactly 10 orders.
+- **Stock** only changes through single database statements that refuse to go below zero. Tested with 40 customers racing for 10 items (exactly 10 orders) and 100 customers racing for the last one (exactly 1).
 - **Double taps:** the app sends an `idempotencyKey` with each checkout. Sending the same one again returns the first order instead of a second one.
 - **Races between people** (shop accepts while the customer cancels, 20 drivers accept one job) always end with exactly one winner.
-- **Limits:** 5 wrong passwords per email in 15 minutes, 60 signups or logins per IP per minute, 5 delivery code tries per order, request bodies up to 64 KB, pages up to 100 rows.
-- **Overload:** if the database is busy, a request waits at most 3 seconds and then gets `503` with `Retry-After: 2`, instead of hanging. No query may run longer than 5 seconds.
+- **Limits:** 300 requests per account per minute (600 per IP without a login), 10 checkouts and 60 price quotes per customer per minute, 5 wrong passwords per email in 15 minutes, 60 signups or logins per IP per minute, 5 delivery code tries per order in a 15-minute window, request bodies up to 64 KB, pages up to 100 rows. PostgreSQL stores delivery code attempts so they survive restarts and apply across replicas. Rate limits return `429`. The general request limiter includes `Retry-After`. Checkout and quotes share 5 slots by default. If all slots are busy, requests wait up to 0.2 seconds before they receive `503`.
+- **Overload:** if the database is busy, a request waits at most 3 seconds and then gets `503` with `Retry-After: 2`, instead of hanging. No query may run longer than 5 seconds, or wait more than 2 seconds for a row another request has locked.
 
 Measured on a laptop, with the app, database and load tool on one machine, so treat these as a floor rather than production numbers. Browsing and admin used 120 shops and 30,000 stocked products; the driver and tracking rows used 100 online drivers and 2,000 finished deliveries. No request failed.
 
@@ -338,6 +344,8 @@ Measured on a laptop, with the app, database and load tool on one machine, so tr
 ## Endpoints
 
 The full, always up-to-date contract is published by the running app:
+
+Both are on when running locally and off in production unless `API_DOCS_ENABLED=true`.
 
 - **Swagger UI:** <http://localhost:8080/swagger-ui.html>
 - **OpenAPI JSON:** <http://localhost:8080/v3/api-docs> (generate a typed frontend client from this)
@@ -432,7 +440,7 @@ POST /api/shops/me/orders/7/accept       { "unavailableItemIds": [12] }
 | `PUT` | `/api/admin/shops/{id}/hours` | Replace the shop's opening hours for the whole week. |
 | `GET` | `/api/admin/orders` | Every order, newest first. Filters: `status`, `shopId`, `customerId`, `driverId`, `needsDriver=true`. |
 | `GET` | `/api/admin/orders/{id}` | One order with everything: both prices, every fee, tip, shop payout, item margin, driver pay, net, all three parties. |
-| `POST` | `/api/admin/orders/{id}/cancel` | Cancel any unfinished order, with a reason. |
+| `POST` | `/api/admin/orders/{id}/cancel` | Cancel an unfinished order with a reason. While capture is processing, poll payment state and retry when it resolves. |
 | `POST` | `/api/admin/orders/{orderId}/assign` | Give an order waiting for pickup to an approved driver (replaces any driver it had). |
 | `POST` | `/api/admin/orders/{orderId}/unassign` | Take it off its driver before pickup; it goes back to the job list. |
 | `GET` | `/api/admin/settings` | Every setting (see [What admin can change](#what-admin-can-change)) and the per-category markups. |
@@ -450,7 +458,7 @@ POST /api/shops/me/orders/7/accept       { "unavailableItemIds": [12] }
 | `GET` | `/api/admin/driver-alerts?open=true` | Daily warnings, ban reviews and "not received" reports, newest first. |
 | `POST` | `/api/admin/driver-alerts/{id}/resolve` | `DISMISS`, or `SUSPEND` the driver. |
 | `GET` | `/api/admin/payouts?periodStart=` | Every driver's pay for a two-week period (default: the last finished one). |
-| `POST` | `/api/admin/payouts/{driverId}/{periodStart}/paid` | Record that a driver was paid for a finished period. |
+| `POST` | `/api/admin/payouts/{driverId}/{periodStart}/paid` | Record manual payment for a finished period with Stripe disabled. |
 | `GET` | `/api/admin/reviews?subjectType=&subjectId=` | Reviews of a `SHOP`, `PRODUCT`, `DRIVER` or `CUSTOMER`, with the average. |
 | `DELETE` | `/api/admin/reviews/{id}` | Remove a review; the average updates. |
 
@@ -519,7 +527,9 @@ GET /api/browse/products?lat=49.2&lng=-122.86&q=maple
 | `GET` | `/api/orders/{id}` | One order, including the `deliveryCode`. |
 | `POST` | `/api/orders/{id}/cancel` | Cancel while the shop has not answered. |
 | `GET` | `/api/orders/{id}/tracking` | Order status and, after pickup, the driver's position and minutes away. |
-| `POST` | `/api/orders/{id}/tip` | Add a tip after checkout (once, up to 24 h after delivery). |
+| `POST` | `/api/orders/{id}/tip` | Add a tip to an order from the legacy flow without Stripe. |
+| `GET` | `/api/orders/{id}/payment` | Read the order's Stripe payment state and Checkout URL when available. |
+| `POST`, `GET` | `/api/orders/{id}/tip/checkout` | Start and read a separate Stripe tip payment within 24 hours of delivery. |
 | `POST` | `/api/orders/{id}/receipt` | Answer "Did you receive your order?" (`{"received": true}`), or report it missing within 24 h. |
 | `POST` | `/api/orders/{id}/reviews` | Rate the shop, rider and products after delivery. |
 | `GET` | `/api/orders/{id}/reviews` | What I wrote for this order (empty = not reviewed yet). |
@@ -538,9 +548,10 @@ POST /api/orders/7/reviews
 ```
 
 - One cart = one shop for now. Up to 50 lines, 1 to 99 of each.
-- `idempotencyKey`: make a new random UUID per checkout attempt, and send the same one again if you retry that attempt.
-- If a line is out of stock the whole order fails with `409`, and the error's `shopProductId` says which line.
-- A customer can have at most 3 orders waiting for a shop's answer.
+- `idempotencyKey`: make a new random UUID per checkout attempt. An identical retry returns the original order. A changed request with the same key returns `409` for orders created after this change.
+- If a line is out of stock or no longer approved, checkout fails with `409`. The error's `shopProductId` identifies the line. Quotes also reject listings that are no longer approved.
+- Order totals over 2,147,483,647 cents are rejected before any stock change commits.
+- A customer can have up to three orders across `PAYMENT_PENDING`, `PLACED` and `CAPTURE_PENDING`.
 - `409` "This shop is closed right now" if the shop closed since the customer browsed.
 - If admin cancels, the order shows `status: CANCELLED` with a `cancelReason`.
 - `driverName` is the rider's name once one has taken the job (`null` before). Shops never get it: the rider tells the shop the order number at the counter.
@@ -694,13 +705,16 @@ There are two parts to deploy:
 ### Checklist
 
 1. **Database:** a managed Postgres 17, with daily backups switched on.
-2. **Secrets:** set `DATABASE_URL`, `DATABASE_USER`, `DATABASE_PASSWORD`, a fresh random `JWT_SECRET` (at least 32 characters), and `ADMIN_EMAIL` and `ADMIN_PASSWORD` for the first admin.
-3. **HTTPS:** put the app behind the host's proxy or load balancer, and set `FORWARD_HEADERS_STRATEGY=native`.
+2. **Secrets:** set `DATABASE_URL`, `DATABASE_USER`, `DATABASE_PASSWORD`, a fresh random `JWT_SECRET` (at least 32 characters), and `ADMIN_EMAIL` and `ADMIN_PASSWORD` (at least 12 characters, or the app will not start) for the first admin.
+3. **HTTPS:** put the app behind a trusted proxy or load balancer. Restrict direct access to the backend, configure the proxy to replace client-supplied forwarding headers, and set `FORWARD_HEADERS_STRATEGY=native`.
 4. **Web app address:** set `CORS_ALLOWED_ORIGINS` on the backend to the web app's address (for example `https://app.yourdomain.ca`).
 5. **Health check:** point the host at `GET /actuator/health`. It answers `{"status":"UP"}` without a login when the app and its database are working, and gives no other details. No other actuator endpoint is exposed.
-6. **API docs:** set `API_DOCS_ENABLED=false` if the Swagger page should not be public.
+6. **API docs:** off by default. Set `API_DOCS_ENABLED=true` only while someone needs the Swagger page.
 7. **After the first start:** log in as admin, set the price settings if 1.5x, $4.99 and $4.99 are not right, then approve shops and set their opening hours.
 8. **Web app:** build it with the backend's address, then upload the `frontend/dist` folder to the static host (commands below). Switch the maps to a paid tile provider before a public launch.
+9. **Spending cap:** set a budget alarm (and a hard cap where the host offers one) on the cloud account, so a flood of traffic cannot run up the bill.
+10. **Time zones:** keep PostgreSQL time zone data current. Shop hours, late-night fees, daily metrics, and pay periods all use its local time rules.
+11. **Payments:** configure [Stripe](#stripe-payments) against a dedicated staging database. Use sandbox credentials for frontend and deployed-environment verification. Enable live mode when the launch checks are complete.
 
 ### Run the jar
 
@@ -758,14 +772,20 @@ Set these as environment variables. Everything else lives in [`application.prope
 | `DATABASE_USER` | `quickcommerce` | Postgres user |
 | `DATABASE_PASSWORD` | empty | Postgres password |
 | `JWT_SECRET` | **required** | Signs login tokens. At least 32 characters. |
-| `ADMIN_EMAIL`, `ADMIN_PASSWORD` | empty | If both are set, this admin is created at startup |
+| `ADMIN_EMAIL`, `ADMIN_PASSWORD` | empty | If both are set, startup creates the admin if needed. Use a valid email that does not belong to a non-admin account. |
 | `MAX_DELIVERY_KM` | `5` | How far (straight line) a customer can be from a shop to see and order from it |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:3000` | Websites allowed to call the API, comma-separated |
 | `FORWARD_HEADERS_STRATEGY` | `none` | Set to `native` behind a proxy |
 | `AUTH_IP_LIMIT_PER_MINUTE` | `60` | Signups and logins per IP per minute |
-| `DB_POOL_SIZE` | `10` | Database connections |
+| `DB_POOL_SIZE` | `10` | Database connections, minimum 2 |
 | `DRIVER_MAX_PINGS_PER_MINUTE` | `60` | Location pings per driver per minute |
-| `API_DOCS_ENABLED` | `true` | Set to `false` to hide Swagger UI in production |
+| `API_DOCS_ENABLED` | `false` | Set to `true` to serve Swagger UI and the OpenAPI JSON |
+| `RATE_LIMIT_PER_USER` | `300` | Requests per logged-in account per minute |
+| `RATE_LIMIT_PER_IP` | `600` | Requests per IP per minute without a login |
+| `CHECKOUTS_PER_MINUTE` | `10` | Orders one customer can place per minute |
+| `QUOTES_PER_MINUTE` | `60` | Price quotes one customer can ask for per minute |
+| `MAX_CONCURRENT_CHECKOUTS` | `5` | Shared checkout and quote limit per server, capped at `DB_POOL_SIZE - 1` |
+| `HTTP_THREADS` | `200` | Requests handled at once, per server |
 | `BUSINESS_TIME_ZONE` | `America/Vancouver` | Decides "today" for daily violation limits and charts, and when pay periods start |
 
 The web app has one setting, `VITE_API_URL`: the backend's address, given at build time (see [Build the web app](#build-the-web-app)).
@@ -776,9 +796,78 @@ Prices, fees, driver pay, violation limits and opening hours are not configurati
 
 ---
 
+## Stripe payments
+
+Set `STRIPE_ENABLED=true`, `STRIPE_API_KEY`, `STRIPE_WEBHOOK_SECRET` and `STRIPE_RETURN_URL` in the backend environment. `STRIPE_LIVE` defaults to `false`. Use a dedicated database for sandbox orders and payouts. Set the return URL to a frontend page that accepts `orderId` and optionally `kind=tip`. Use HTTPS for deployed environments. Local HTTP is supported in sandbox mode.
+
+For local sandbox testing, run Stripe CLI with the sandbox API key and use its signing secret in the backend environment.
+
+```sh
+stripe listen --events checkout.session.completed,checkout.session.expired \
+  --forward-to http://127.0.0.1:8080/api/payments/stripe/webhook
+```
+
+For a deployed backend, register the same two snapshot events at `POST /api/payments/stripe/webhook` and inject that endpoint's signing secret. Allow `Content-Type: application/json`, `Content-Length` and `Stripe-Signature` to reach the app. The backend verifies the original request body and signature and reconciles against Stripe. The worker polls outstanding Checkout Sessions if an event is delayed.
+
+### Customer and shop flow
+
+1. `POST /api/orders` reserves stock and returns `PAYMENT_PENDING`. Retry with the same order idempotency key. Poll `GET /api/orders/{id}/payment` and redirect to the returned `checkoutUrl` when the payment is `OPEN`. Stock is held for up to ten minutes while the customer completes checkout.
+2. On return, poll the order and its payment. Stripe's card authorization moves the order to `PLACED` for the shop. Customers can cancel before payment or while the shop is deciding. A decline leaves the order in `PAYMENT_PENDING` so the customer can retry the same session.
+3. Shop acceptance moves the order to `CAPTURE_PENDING`. The worker charges only available items plus the checkout fees and any tip. A confirmed capture moves the order to `ACCEPTED`, which lets the shop mark it ready and the driver take the job. Rejection, cancellation or expiration releases the hold or queues a refund for a captured order.
+4. For delivered Stripe orders without a tip, `POST /api/orders/{id}/tip/checkout` with `{"tipCents":200}` starts a separate payment within 24 hours. Poll the same path with `GET`; redirect to its `checkoutUrl`. A successful capture credits the driver's pay period based on the time the tip is processed.
+
+### Payments frontend handoff
+
+| Screen | Required change |
+|---|---|
+| Customer checkout | Remove the free-checkout message. Show the backend quote in CAD. Keep the same idempotency key and checkout request for retries. After creating an order, poll its payment endpoint and open the Stripe-hosted URL once available. |
+| Customer orders and return page | Read `orderId` and optional `kind=tip` from the configured return route. Fetch the authenticated order and payment state after return, refresh or sign-in. Show pay/resume and cancel while payment is pending, card hold while the shop decides, and charge processing during `CAPTURE_PENDING`. Render expired, voided, refunding, refunded and under-review outcomes. Show payment confirmation after the backend reports capture. |
+| Customer tips | Start separate tips through `POST /api/orders/{id}/tip/checkout`. Poll that resource and use its Checkout URL. Update the displayed tip after capture. |
+| Shop orders | Show `CAPTURE_PENDING` after acceptance, including when the order has left the new-order inbox. Refresh until capture resolves. Enable **Ready** when the order is `ACCEPTED`. Keep the unavailable-item selection that determines the final charge. |
+| Driver | Keep assignment tied to the jobs API. Show confirmed tips from pay statements and use the existing delivery workflow. |
+| Admin | Show payment, tip and transfer states, including the reconciliation queues below. Use the Stripe payout endpoints for linked recipients when Stripe is enabled. Show a transfer as queued or transferred based on its backend state. |
+
+For `429` or transient `503` responses, back off and retry the same checkout attempt. For `409`, refresh the order or quote before offering the next action. An order marked `EXPIRED` together with payment `REVIEW_REQUIRED` should show that payment is under review.
+
+### Admin payment and settlement
+
+| Method | Path | Result |
+|---|---|---|
+| `GET` | `/api/admin/orders/{id}/payment` | Stripe payment state and provider IDs for one order |
+| `GET` | `/api/admin/orders/{id}/payment/tip` | Stripe payment state and provider IDs for a separate tip |
+| `PUT` | `/api/admin/stripe/recipients/{kind}/{id}` | Link a verified Canadian Stripe Connect account using `{"accountId":"acct_…"}`. Use the shop ID for `SHOP` or the driver user ID for `DRIVER`. |
+| `POST` | `/api/admin/stripe/orders/{id}/transfer` | Queue the delivered order's shop earnings using its captured charge |
+| `POST` | `/api/admin/stripe/driver-payouts/{driverId}/{periodStart}` | Queue a finished period's driver earnings and tips from the platform balance |
+| `GET` | `/api/admin/stripe/transfers/{id}` | Read the settlement state and Stripe transfer ID |
+| `GET` | `/api/admin/stripe/payment-reviews?page=0&size=20` | Payment and tip attempts that need reconciliation |
+| `GET` | `/api/admin/stripe/transfer-reviews?page=0&size=20` | Transfers that need reconciliation in the configured Stripe mode |
+
+Recipients complete Stripe Connect onboarding before an admin links their Stripe accounts. A confirmed transfer credits the recipient's Stripe balance. Their bank payout follows the connected account's payout schedule. The worker checks the Stripe charge before sending a shop transfer. An already refunded or disputed charge goes to admin review. Chargebacks and adjustments after delivery are handled in Stripe.
+
+A capture still unresolved after 30 minutes goes to `REVIEW_REQUIRED`. The order expires and available stock is released. Treat a payment under review as unresolved in the customer UI. Admins can use the review endpoints and the Stripe IDs in the detail endpoints to confirm what happened before issuing any refund or transfer. The worker checks Stripe for an existing refund or transfer after a lost response. It stops sending new requests for an unknown result before Stripe's idempotency key can expire.
+
+`STRIPE_WORKER_CONCURRENCY` defaults to four in-flight jobs per backend instance. Keep this within the service's PostgreSQL and Stripe budgets when adding replicas. Money operations are protected by database claims and Stripe idempotency keys. Checkout, capture, refunds and Connect transfers are covered by the local integration suite against PostgreSQL and an HTTP Stripe simulator.
+
+---
+
 ## Tests
 
-`mvn test` (in `backend`) runs 102 tests against a real Postgres, over real HTTP, the same way the web app calls the API. The web app itself has no automated tests yet.
+### Verified in this release
+
+- **Backend suite.** 132 tests passed using the Maven test suite. Payment integration tests use real PostgreSQL, the HTTP API and a Stripe simulator. They cover webhook signatures, authorization, duplicate requests, competing state changes, retry and recovery, and Connect transfer bookkeeping.
+- **Stripe sandbox.** Verified CAD 25.96 authorized, CAD 19.97 captured after removing an item, and CAD 19.97 refunded. Also verified a card decline, a 3-D Secure authorization followed by a released hold, and a CAD 2.00 post-delivery tip credited to the driver.
+- **Local payment load.** A burst of 96 checkout requests from 24 customers produced 24 Checkout Sessions and 24 captures. No stock was oversold. This run used the Stripe simulator.
+
+From `backend/`, run `mvn test` for the full suite or `mvn -Dtest=StripePaymentTest test` for payment and checkout concurrency coverage.
+
+### Remaining testing before launch
+
+1. **Frontend staging walkthrough.** Exercise a full order across customer, shop, driver and admin. Include tab refresh and return from Stripe, repeated clicks, a decline, cancelled and expired checkout, 3-D Secure, partial capture, refund, and a post-delivery tip.
+2. **Stripe Connect sandbox.** Once Connect is enrolled, onboard eligible Canadian test recipients. Verify one delivered-order shop transfer and one closed-period driver transfer. Retry each through the admin UI and confirm one transfer, the correct CAD amount and matching Stripe and QuikE records. Connect transfers have passed the local simulator tests.
+3. **Deployed webhook and security checks.** Verify HTTPS at the public endpoint, original signed body delivery through the proxy, handling of duplicate and delayed events, trusted forwarded headers, role access, and production API documentation settings.
+4. **Staging load and recovery.** Use a Stripe simulator for sustained and burst traffic at the planned peak, including multiple backend replicas. Measure p95 latency, error rates, database pool usage and payment queue age. Restart a worker during capture or refund, simulate provider timeout and throttling, and check that stock, charges and payout records reconcile once.
+
+### Backend test suites
 
 | Test | What it checks |
 |---|---|
@@ -790,6 +879,7 @@ Prices, fees, driver pay, violation limits and opening hours are not configurati
 | `DriverWorkTest` | Engaged-time pay, pay statements and payouts, violations, admin alerts, "Did you receive it?", metrics |
 | `ReviewTest` | Reviews from customers and riders, averages in browsing, admin removal |
 | `AdminTest` | Prices and fees, opening hours, order board, cancel, assigning drivers, suspending accounts, dashboard, health check |
-| `SecurityTest` | Forged tokens, SQL injection, oversized bodies, error leaks |
+| `StripePaymentTest` | Signed webhooks, ownership, payment races, recovery after lost Stripe responses, Connect transfers, tip accounting and a 96-request checkout burst |
+| `SecurityTest` | Forged tokens, SQL injection, oversized bodies, error leaks, security headers, image links, locked rows failing fast |
 | `ConcurrencyTest`, `OrderConcurrencyTest`, `DriverConcurrencyTest`, `AdminConcurrencyTest` | Many requests at the same moment: stock never oversold, one winner per race, no deadlocks, admin actions racing shops and drivers |
-| `IpThrottleTest`, `PingThrottleTest`, `auth/ThrottleTest` | Rate limits |
+| `IpThrottleTest`, `PingThrottleTest`, `RateLimitTest`, `auth/ThrottleTest` | Rate limits, checkout limits, API docs off in production |

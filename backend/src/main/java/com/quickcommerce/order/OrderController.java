@@ -1,5 +1,7 @@
 package com.quickcommerce.order;
 
+import com.quickcommerce.auth.Throttle;
+import com.quickcommerce.common.Bulkhead;
 import com.quickcommerce.order.OrderViews.CustomerOrderView;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
@@ -8,9 +10,12 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -61,15 +66,41 @@ public class OrderController {
 
     private final OrderService orderService;
 
-    OrderController(OrderService orderService) {
+    private final Throttle throttle;
+    private final Bulkhead checkouts;
+    private final int checkoutsPerMinute;
+    private final int quotesPerMinute;
+
+    OrderController(OrderService orderService, Throttle throttle,
+            @Value("${app.orders.checkouts-per-minute}") int checkoutsPerMinute,
+            @Value("${app.orders.quotes-per-minute}") int quotesPerMinute,
+            @Value("${app.orders.max-concurrent-checkouts}") int maxConcurrentCheckouts,
+            @Value("${spring.datasource.hikari.maximum-pool-size}") int dbPoolSize) {
         this.orderService = orderService;
+        this.throttle = throttle;
+        this.checkoutsPerMinute = checkoutsPerMinute;
+        this.quotesPerMinute = quotesPerMinute;
+        if (maxConcurrentCheckouts < 1 || dbPoolSize < 2) {
+            throw new IllegalArgumentException("Checkout needs at least one slot and a database pool of at least two connections");
+        }
+        this.checkouts = new Bulkhead(Math.min(maxConcurrentCheckouts, dbPoolSize - 1), 200,
+                "Checkout is busy. Try again in a moment.");
+    }
+
+    private void limit(String kind, Long customerId, int perMinute, String message) {
+        if (!throttle.tryAcquire(kind + ":" + customerId, perMinute, Duration.ofMinutes(1), Instant.now())) {
+            throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, message);
+        }
     }
 
     /** 201 for a new order, 200 when the same idempotencyKey was already used (the first order is returned). */
     @PostMapping
     ResponseEntity<CustomerOrderView> place(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody PlaceRequest req) {
-        var placed = orderService.place(customerId(jwt), req.shopId(), req.idempotencyKey(), quantities(req.items()),
-                req.address(), req.note(), req.tipCents() == null ? 0 : req.tipCents());
+        Long customerId = customerId(jwt);
+        limit("checkout", customerId, checkoutsPerMinute, "Too many checkouts. Wait a minute and try again.");
+        Map<Long, Integer> quantities = quantities(req.items());
+        var placed = checkouts.run(() -> orderService.place(customerId, req.shopId(), req.idempotencyKey(), quantities,
+                req.address(), req.note(), req.tipCents() == null ? 0 : req.tipCents()));
         return ResponseEntity.status(placed.created() ? HttpStatus.CREATED : HttpStatus.OK).body(placed.order());
     }
 
@@ -79,9 +110,11 @@ public class OrderController {
      * late-night and surge fees before tapping "Place order".
      */
     @PostMapping("/quote")
-    OrderService.Quote quote(@Valid @RequestBody QuoteRequest req) {
-        return orderService.quote(req.shopId(), quantities(req.items()), req.address(),
-                req.tipCents() == null ? 0 : req.tipCents());
+    OrderService.Quote quote(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody QuoteRequest req) {
+        limit("quote", customerId(jwt), quotesPerMinute, "Too many price checks. Wait a minute and try again.");
+        Map<Long, Integer> quantities = quantities(req.items());
+        return checkouts.run(() -> orderService.quote(req.shopId(), quantities, req.address(),
+                req.tipCents() == null ? 0 : req.tipCents()));
     }
 
     /** Adds a tip after checkout, if none was given: until 24 h after delivery. */

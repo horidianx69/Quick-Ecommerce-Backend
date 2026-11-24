@@ -5,6 +5,7 @@ import com.quickcommerce.order.OrderViews.AdminOrderView;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;
 import org.springframework.http.HttpStatus;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -32,8 +33,9 @@ public class AdminDispatchController {
      * driver it had. The driver need not be online: admin has usually called them.
      */
     @PostMapping("/assign")
+    @Transactional
     AdminOrderView assign(@PathVariable Long orderId, @Valid @RequestBody AssignRequest req) {
-        Driver driver = drivers.findById(req.driverId())
+        Driver driver = drivers.findWithLockByUserId(req.driverId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Driver not found"));
         if (driver.getStatus() != Driver.Status.APPROVED) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "That driver is not approved");

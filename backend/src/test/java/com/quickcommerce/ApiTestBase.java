@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 import com.jayway.jsonpath.JsonPath;
+import com.quickcommerce.common.DatabaseTime;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpHeaders;
@@ -23,6 +24,7 @@ import java.util.concurrent.Future;
 import java.util.function.IntFunction;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
@@ -37,6 +39,9 @@ import org.springframework.test.context.ActiveProfiles;
 @ActiveProfiles("dev")
 @Import(EmbeddedDb.class)
 abstract class ApiTestBase {
+
+    @Autowired
+    DatabaseTime time;
 
     static final String PASSWORD = "correct-horse-1";
     static final String VALID_SHOP = """

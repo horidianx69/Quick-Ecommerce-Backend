@@ -34,8 +34,18 @@ public interface ShopProductRepository extends JpaRepository<ShopProduct, Long> 
     @Query(VIEW + " and sp.id = :id")
     Optional<ShopProductView> view(Long shopId, Long id);
 
-    @Query(VIEW + " and sp.id in :ids")
-    List<ShopProductView> viewsIn(Long shopId, Collection<Long> ids);
+    @Query(VIEW + " and sp.id in :ids and p.status = com.quickcommerce.catalog.CatalogProduct.Status.APPROVED")
+    List<ShopProductView> approvedViewsIn(Long shopId, Collection<Long> ids);
+
+    // Hold a shared lock on the catalog row so approval cannot change during this reservation.
+    @Modifying
+    @Query(value = """
+            update shop_products sp set quantity = sp.quantity - :quantity
+            where sp.shop_id = :shopId and sp.id = :id and sp.quantity >= :quantity
+              and exists (select 1 from catalog_products p where p.id = sp.product_id
+                          and p.status = 'APPROVED' for share)
+            """, nativeQuery = true)
+    int reserve(Long shopId, Long id, int quantity);
 
     boolean existsByIdAndShopId(Long id, Long shopId);
 

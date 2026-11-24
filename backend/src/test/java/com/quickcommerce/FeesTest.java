@@ -6,7 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.LocalTime;
-import java.time.ZoneId;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -73,7 +72,7 @@ class FeesTest extends ApiTestBase {
     void lateNightFeeAppliesInsideTheWindowInTheShopsTime() {
         String admin = adminToken();
         Stocked s = stockedShop(admin, 1000, 10); // a BC shop: America/Vancouver
-        LocalTime now = LocalTime.now(ZoneId.of("America/Vancouver")).withNano(0);
+        LocalTime now = time.localNow("America/Vancouver").toLocalTime().withNano(0);
         try {
             put("/api/admin/settings", admin, "{\"lateNightStart\":\"%s\",\"lateNightEnd\":\"%s\"}"
                     .formatted(now.minusHours(1), now.plusHours(1)));

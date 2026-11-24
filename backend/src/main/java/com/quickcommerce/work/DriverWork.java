@@ -1,13 +1,12 @@
 package com.quickcommerce.work;
 
+import com.quickcommerce.common.DatabaseTime;
 import com.quickcommerce.common.Settings;
 import java.time.Instant;
 import java.time.LocalDate;
-import java.time.ZoneId;
 import java.util.List;
 import java.util.Optional;
 import javax.sql.DataSource;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -37,16 +36,12 @@ public class DriverWork {
 
     private final JdbcClient jdbc;
     private final Settings settings;
-    private final ZoneId businessZone;
+    private final DatabaseTime time;
 
-    DriverWork(DataSource dataSource, Settings settings, @Value("${app.business-time-zone}") String businessZone) {
+    DriverWork(DataSource dataSource, Settings settings, DatabaseTime time) {
         this.jdbc = JdbcClient.create(dataSource);
         this.settings = settings;
-        this.businessZone = ZoneId.of(businessZone);
-    }
-
-    public ZoneId businessZone() {
-        return businessZone;
+        this.time = time;
     }
 
     // --------------------------------------------------------- engagements
@@ -119,7 +114,7 @@ public class DriverWork {
 
     /**
      * The driver used up the delivery-code tries on this order: one violation, however many more tries follow.
-     * The caller then refuses the request with CodeTriesUsed, which does not roll this back.
+     * The caller refuses the request without rolling back the violation.
      */
     @Transactional
     public void codeTriesUsed(long orderId) {
@@ -163,8 +158,8 @@ public class DriverWork {
                 """)
                 .param("driver", driverId).param("order", orderId).param("type", type.name()).param("detail", detail)
                 .update();
-        LocalDate today = LocalDate.now(businessZone);
-        int todayCount = countSince(driverId, today.atStartOfDay(businessZone).toInstant());
+        LocalDate today = time.today();
+        int todayCount = countSince(driverId, time.dayStart(today));
         int monthCount = countSince(driverId, Instant.now().minusSeconds(30L * 24 * 3600));
         if (todayCount >= s.dailyViolationLimit()) {
             jdbc.sql("""

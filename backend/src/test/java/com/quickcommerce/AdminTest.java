@@ -6,8 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.DayOfWeek;
-import java.time.LocalDate;
-import java.time.ZoneId;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
@@ -162,7 +160,7 @@ class AdminTest extends ApiTestBase {
         assertEquals(7, get("/api/admin/shops/" + s.shopId(), admin).<List<?>>read("$.hours").size());
 
         // Open every day except today (in the shop's own time zone): closed right now.
-        DayOfWeek today = LocalDate.now(ZoneId.of("America/Vancouver")).getDayOfWeek();
+        DayOfWeek today = time.today().getDayOfWeek();
         String notToday = "{\"hours\":[" + String.join(",", Arrays.stream(DayOfWeek.values()).filter(d -> d != today)
                 .map(d -> "{\"dayOfWeek\":\"" + d + "\",\"opens\":\"00:00\",\"closes\":\"23:59:59\"}").toList()) + "]}";
         Res closed = put("/api/admin/shops/" + s.shopId() + "/hours", admin, notToday);

@@ -1,6 +1,7 @@
 package com.quickcommerce.order;
 
 import com.quickcommerce.order.Order.Status;
+import jakarta.persistence.LockModeType;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
@@ -9,6 +10,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 
@@ -22,11 +24,18 @@ public interface OrderRepository extends JpaRepository<Order, Long>, JpaSpecific
 
     Page<Order> findByCustomerId(Long customerId, Pageable pageable);
 
-    Page<Order> findByShopId(Long shopId, Pageable pageable);
+    Page<Order> findByShopIdAndStatusNot(Long shopId, Status hidden, Pageable pageable);
 
     Page<Order> findByShopIdAndStatus(Long shopId, Status status, Pageable pageable);
 
-    long countByCustomerIdAndStatus(Long customerId, Status status);
+    long countByCustomerIdAndStatusIn(Long customerId, Collection<Status> statuses);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    Optional<Order> findWithLockById(Long id);
+
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("update Order o set o.status = :placed, o.createdAt = :now where o.id = :id and o.status = :pending")
+    int authorizePayment(Long id, Status pending, Status placed, Instant now);
 
     List<Order> findTop200ByStatusAndCreatedAtBeforeOrderById(Status status, Instant cutoff);
 
@@ -80,6 +89,9 @@ public interface OrderRepository extends JpaRepository<Order, Long>, JpaSpecific
     boolean existsByDriverIdAndStatusIn(Long driverId, Collection<Status> statuses);
 
     Optional<Order> findFirstByDriverIdAndStatusIn(Long driverId, Collection<Status> statuses);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    Optional<Order> findFirstWithLockByDriverIdAndStatusIn(Long driverId, Collection<Status> statuses);
 
     Page<Order> findByDriverIdAndStatus(Long driverId, Status status, Pageable pageable);
 

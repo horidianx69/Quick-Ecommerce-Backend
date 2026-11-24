@@ -10,6 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Locale;
+import java.util.UUID;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -36,11 +37,19 @@ public class AuthController {
             @NotBlank @Email @Size(max = 254) String email,
             @NotBlank @Size(min = 8, max = 72) String password,
             @NotBlank @Size(max = 100) String name,
-            Role role) {}
+            Role role) {
+        public SignupRequest {
+            email = normalize(email);
+        }
+    }
 
     public record LoginRequest(
             @NotBlank @Size(max = 254) String email,
-            @NotBlank @Size(max = 72) String password) {}
+            @NotBlank @Size(max = 72) String password) {
+        public LoginRequest {
+            email = normalize(email);
+        }
+    }
 
     static final int LOGIN_ATTEMPTS_PER_EMAIL = 5;
     static final Duration LOGIN_WINDOW = Duration.ofMinutes(15);
@@ -55,6 +64,7 @@ public class AuthController {
 
     private final UserRepository users;
     private final PasswordEncoder passwordEncoder;
+    private final String unknownUserPasswordHash;
     private final JwtEncoder jwtEncoder;
     private final Throttle throttle;
     private final Duration tokenTtl;
@@ -65,6 +75,7 @@ public class AuthController {
             @Value("${app.auth.ip-limit-per-minute}") int ipLimitPerMinute) {
         this.users = users;
         this.passwordEncoder = passwordEncoder;
+        this.unknownUserPasswordHash = passwordEncoder.encode(UUID.randomUUID().toString());
         this.jwtEncoder = jwtEncoder;
         this.throttle = throttle;
         this.tokenTtl = tokenTtl;
@@ -87,7 +98,7 @@ public class AuthController {
         if (role == Role.ADMIN) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "role must be SHOP, CUSTOMER or DRIVER");
         }
-        String email = normalize(req.email());
+        String email = req.email();
         if (users.existsByEmail(email)) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Email already registered");
         }
@@ -103,16 +114,19 @@ public class AuthController {
     AuthResponse login(@Valid @RequestBody LoginRequest req, HttpServletRequest http) {
         limitByIp(http);
         requireBcryptSafe(req.password());
-        String email = normalize(req.email());
+        String email = req.email();
         // The attempt is counted before the password check, so a burst of parallel
         // guesses cannot all get through. A correct login clears the count.
         if (!throttle.tryAcquire("login:" + email, LOGIN_ATTEMPTS_PER_EMAIL, LOGIN_WINDOW, Instant.now())) {
             throw tooManyRequests();
         }
-        User user = users.findByEmail(email)
-                .filter(u -> passwordEncoder.matches(req.password(), u.getPasswordHash()))
-                // Same answer for "no such email" and "wrong password".
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Wrong email or password"));
+        User user = users.findByEmail(email).orElse(null);
+        // Unknown accounts still do one bcrypt check before the generic error.
+        String hash = user == null ? unknownUserPasswordHash : user.getPasswordHash();
+        boolean matches = passwordEncoder.matches(req.password(), hash);
+        if (user == null || !matches) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Wrong email or password");
+        }
         throttle.reset("login:" + email);
         // Checked only after the password, so it tells nothing to someone guessing passwords.
         if (user.isDisabled()) {
@@ -169,6 +183,6 @@ public class AuthController {
     }
 
     static String normalize(String email) {
-        return email.trim().toLowerCase(Locale.ROOT);
+        return email == null ? null : email.trim().toLowerCase(Locale.ROOT);
     }
 }
