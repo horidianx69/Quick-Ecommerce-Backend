@@ -4,16 +4,17 @@ import com.quickcommerce.auth.User;
 import com.quickcommerce.auth.UserRepository;
 import com.quickcommerce.common.Geo;
 import com.quickcommerce.common.Settings;
+import com.quickcommerce.order.DeliveryCodeRejection;
 import com.quickcommerce.order.Order;
 import com.quickcommerce.order.Order.Status;
 import com.quickcommerce.order.OrderService;
 import com.quickcommerce.shop.Shop;
 import com.quickcommerce.shop.ShopService;
-import com.quickcommerce.work.CodeTriesUsed;
 import com.quickcommerce.work.DriverWork;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.http.HttpStatus;
@@ -120,7 +121,7 @@ public class DispatchService {
      */
     @Transactional
     public DeliveryView accept(Long driverId, Long orderId) {
-        Driver driver = requireWorking(driverId);
+        Driver driver = requireWorking(drivers.findWithLockByUserId(driverId));
         Order job = orders.findOpenJob(orderId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.CONFLICT, "This job has been taken"));
         Shop shop = shops.require(job.getShopId());
@@ -148,7 +149,7 @@ public class DispatchService {
         return current(driverId);
     }
 
-    @Transactional(noRollbackFor = CodeTriesUsed.class)
+    @Transactional(noRollbackFor = DeliveryCodeRejection.class)
     public DeliveryView delivered(Long driverId, String code) {
         Driver driver = drivers.findById(driverId).orElseThrow();
         return view(orders.require(orders.deliver(driverId, code, driver.getLatitude(), driver.getLongitude())));
@@ -162,7 +163,11 @@ public class DispatchService {
     }
 
     private Driver requireWorking(Long driverId) {
-        Driver driver = drivers.findById(driverId)
+        return requireWorking(drivers.findById(driverId));
+    }
+
+    private Driver requireWorking(Optional<Driver> profile) {
+        Driver driver = profile
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Create your driver profile first"));
         if (driver.getStatus() != Driver.Status.APPROVED || !driver.isOnline()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Go online first");

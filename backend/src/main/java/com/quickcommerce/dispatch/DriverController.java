@@ -94,13 +94,13 @@ public class DriverController {
     @PostMapping("/api/drivers/me/offline")
     @Transactional
     Driver goOffline(@AuthenticationPrincipal Jwt jwt) {
-        if (orderService.findActiveDelivery(id(jwt)).isPresent()) {
+        Long driverId = id(jwt);
+        drivers.findWithLockByUserId(driverId).orElseThrow(DriverController::noProfile);
+        if (orderService.findActiveDelivery(driverId).isPresent()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Finish or give back your delivery before going offline");
         }
-        if (drivers.goOffline(id(jwt)) == 0) {
-            throw noProfile();
-        }
-        return drivers.findById(id(jwt)).orElseThrow();
+        drivers.goOffline(driverId);
+        return drivers.findById(driverId).orElseThrow();
     }
 
     /**

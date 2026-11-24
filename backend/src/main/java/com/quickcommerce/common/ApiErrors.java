@@ -16,6 +16,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 /** All errors leave as RFC 7807 problem+json. The base class covers the standard Spring ones. */
 @RestControllerAdvice
@@ -30,6 +31,15 @@ public class ApiErrors extends ResponseEntityExceptionHandler {
                 .forEach(e -> errors.putIfAbsent(e.getField(), e.getDefaultMessage()));
         ProblemDetail body = ex.getBody();
         body.setProperty("errors", errors);
+        return handleExceptionInternal(ex, body, headers, status, request);
+    }
+
+    /** Unknown path: the default message names Spring internals ("No static resource ..."). */
+    @Override
+    protected ResponseEntity<Object> handleNoResourceFoundException(NoResourceFoundException ex, HttpHeaders headers,
+            HttpStatusCode status, WebRequest request) {
+        ProblemDetail body = ex.getBody();
+        body.setDetail("Not found");
         return handleExceptionInternal(ex, body, headers, status, request);
     }
 

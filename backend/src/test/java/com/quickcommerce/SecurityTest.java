@@ -7,10 +7,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.ByteArrayInputStream;
 import java.net.http.HttpRequest.BodyPublishers;
 import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 
 /** Attacks the API the way a hostile client would. Every test must end in a clean refusal, never a 5xx. */
 class SecurityTest extends ApiTestBase {
@@ -197,6 +200,11 @@ class SecurityTest extends ApiTestBase {
         assertTrue(res.headers().firstValue("Cache-Control").orElse("").contains("no-store"),
                 "API answers must not be cached by browsers or proxies");
 
+        assertEquals("default-src 'none'; frame-ancestors 'none'",
+                res.headers().firstValue("Content-Security-Policy").orElse(null), "the API lets a browser load nothing");
+        assertEquals("no-referrer", res.headers().firstValue("Referrer-Policy").orElse(null));
+        assertTrue(res.headers().firstValue("Set-Cookie").isEmpty(), "no session cookie: tokens only, so no CSRF");
+
         // A site that is not on the allow-list gets no CORS permission.
         var evil = java.net.http.HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + port + "/api/auth/login"))
                 .header("Origin", "https://evil.example").header("Access-Control-Request-Method", "POST")
@@ -207,5 +215,48 @@ class SecurityTest extends ApiTestBase {
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    @Test
+    void unknownPathsSayNotFoundAndNothingMore() {
+        Res res = get("/api/nope", shopOwner());
+        assertEquals(404, res.status());
+        assertEquals("Not found", res.<String>read("$.detail"), res.body());
+    }
+
+    @Test
+    void productImagesMustBeHttpsLinks() {
+        String admin = adminToken();
+        for (String bad : List.of("javascript:alert(1)", "http://plain.example/a.png", "data:text/html,hi", "https://a b")) {
+            String body = productJson("Img " + UUID.randomUUID(), null, "APPROVED").replace("}", ",\"imageUrl\":\"" + bad + "\"}");
+            assertEquals(400, post("/api/admin/catalog", admin, body).status(), bad);
+        }
+        String ok = productJson("Img " + UUID.randomUUID(), null, "APPROVED").replace("}", ",\"imageUrl\":\"https://cdn.example/a.png\"}");
+        assertEquals(201, post("/api/admin/catalog", admin, ok).status());
+    }
+
+    @Autowired
+    DataSource dataSource;
+
+    /** A row held locked elsewhere makes a request give up after the lock timeout (2 s) with a 503, not hang. */
+    @Test
+    void aLockedRowFailsFastInsteadOfHanging() throws Exception {
+        Stocked s = stockedShop(adminToken(), 1000, 5);
+        try (Connection holder = dataSource.getConnection()) {
+            holder.setAutoCommit(false);
+            try (var st = holder.prepareStatement("select id from shop_products where id = ? for update")) {
+                st.setLong(1, s.rowId());
+                st.executeQuery();
+            }
+            long start = System.nanoTime();
+            Res res = post("/api/shops/me/products/" + s.rowId() + "/stock", s.shop(), "{\"change\":1}");
+            long millis = (System.nanoTime() - start) / 1_000_000;
+            assertEquals(503, res.status(), res.body());
+            assertEquals("2", res.headers().firstValue("Retry-After").orElse(null));
+            assertTrue(millis < 4000, "gave up after " + millis + " ms");
+            holder.rollback();
+        }
+        assertEquals(6, post("/api/shops/me/products/" + s.rowId() + "/stock", s.shop(), "{\"change\":1}").<Integer>read("$.quantity"),
+                "works again once the lock is gone");
     }
 }

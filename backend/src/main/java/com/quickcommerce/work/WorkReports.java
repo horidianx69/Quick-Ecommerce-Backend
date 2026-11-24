@@ -1,5 +1,6 @@
 package com.quickcommerce.work;
 
+import com.quickcommerce.common.DatabaseTime;
 import com.quickcommerce.common.Settings;
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -21,7 +22,8 @@ import org.springframework.web.server.ResponseStatusException;
  *
  * Pay periods are 14 days starting on app.pay.period-anchor (a Tuesday), in the
  * business time zone. An engagement counts in the period it ended in; a tip in
- * the period its order was delivered in. Pay day is the Tuesday after the period.
+ * the period its order was delivered in, or when a separate Stripe tip was captured.
+ * Pay day is the Tuesday after the period.
  */
 @Service
 public class WorkReports {
@@ -49,13 +51,15 @@ public class WorkReports {
     private final JdbcClient jdbc;
     private final DriverWork work;
     private final Settings settings;
+    private final DatabaseTime time;
     private final LocalDate anchor;
 
-    WorkReports(DataSource dataSource, DriverWork work, Settings settings,
+    WorkReports(DataSource dataSource, DriverWork work, Settings settings, DatabaseTime time,
             @Value("${app.pay.period-anchor}") LocalDate anchor) {
         this.jdbc = JdbcClient.create(dataSource);
         this.work = work;
         this.settings = settings;
+        this.time = time;
         this.anchor = anchor;
     }
 
@@ -78,7 +82,7 @@ public class WorkReports {
     }
 
     public Period currentPeriod() {
-        return periodOf(LocalDate.now(work.businessZone()));
+        return periodOf(time.today());
     }
 
     /** The driver's statements, the current period first, then the ones before it. */
@@ -100,8 +104,8 @@ public class WorkReports {
     }
 
     private List<DriverPay> pay(Period period, long driverId) {
-        Timestamp from = Timestamp.from(period.start().atStartOfDay(work.businessZone()).toInstant());
-        Timestamp to = Timestamp.from(period.payDay().atStartOfDay(work.businessZone()).toInstant());
+        Timestamp from = Timestamp.from(time.dayStart(period.start()));
+        Timestamp to = Timestamp.from(time.dayStart(period.payDay()));
         return jdbc.sql("""
                 with eng as (
                     select driver_id, count(*) filter (where end_reason = 'DELIVERED') as deliveries,
@@ -110,11 +114,21 @@ public class WorkReports {
                     where ended_at >= :from and ended_at < :to and (:driver = 0 or driver_id = :driver)
                     group by driver_id
                 ), tips as (
-                    select driver_id, sum(tip_cents) as tips
-                    from orders
-                    where status = 'DELIVERED' and driver_id is not null and delivered_at >= :from and delivered_at < :to
-                      and (:driver = 0 or driver_id = :driver)
-                    group by driver_id
+                    select driver_id, sum(amount) as tips
+                    from (
+                        select o.driver_id, o.tip_cents as amount
+                        from orders o
+                        where o.status = 'DELIVERED' and o.driver_id is not null
+                            and o.delivered_at >= :from and o.delivered_at < :to
+                            and (:driver = 0 or o.driver_id = :driver)
+                            and not exists (select 1 from order_payments p where p.order_id = o.id
+                                            and p.kind = 'TIP' and p.state = 'CAPTURED')
+                        union all
+                        select o.driver_id, p.capture_cents
+                        from order_payments p join orders o on o.id = p.order_id
+                        where p.kind = 'TIP' and p.state = 'CAPTURED' and p.captured_at >= :from and p.captured_at < :to
+                            and (:driver = 0 or o.driver_id = :driver)
+                    ) entries group by driver_id
                 ), ids as (select driver_id from eng union select driver_id from tips)
                 select ids.driver_id, u.name, coalesce(e.deliveries, 0) as deliveries, coalesce(e.secs, 0) as secs,
                        coalesce(e.km, 0) as km, coalesce(e.pay, 0) as pay, coalesce(t.tips, 0) as tips, p.paid_at
@@ -145,11 +159,15 @@ public class WorkReports {
      */
     @Transactional
     public DriverPay markPaid(long driverId, Period period) {
-        if (!LocalDate.now(work.businessZone()).isAfter(period.lastDay())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "This period has not ended yet");
+        jdbc.sql("select user_id from drivers where user_id = :id for update").param("id", driverId)
+                .query(Long.class).optional();
+        if (jdbc.sql("""
+                select exists(select 1 from stripe_transfers where kind = 'DRIVER' and recipient_id = :id
+                    and period_start = :start)
+                """).param("id", driverId).param("start", period.start()).query(Boolean.class).single()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "This pay period has a Stripe transfer");
         }
-        DriverPay pay = pay(period, driverId).stream().findFirst()
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Nothing earned in this period"));
+        DriverPay pay = requirePayable(driverId, period);
         int inserted = jdbc.sql("""
                 insert into driver_payouts (driver_id, period_start, amount_cents) values (:d, :start, :amount)
                 on conflict do nothing
@@ -161,11 +179,19 @@ public class WorkReports {
         return pay(period, driverId).get(0);
     }
 
+    public DriverPay requirePayable(long driverId, Period period) {
+        if (!time.today().isAfter(period.lastDay())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "This period has not ended yet");
+        }
+        return pay(period, driverId).stream().findFirst()
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Nothing earned in this period"));
+    }
+
     // ---------------------------------------------------------- violations
 
     public ViolationSummary violations(long driverId, int days) {
         Settings.Values s = settings.current();
-        int today = work.countSince(driverId, LocalDate.now(work.businessZone()).atStartOfDay(work.businessZone()).toInstant());
+        int today = work.countSince(driverId, time.dayStart(time.today()));
         int month = work.countSince(driverId, Instant.now().minus(30, ChronoUnit.DAYS));
         List<Violation> recent = jdbc.sql("""
                 select id, order_id, type, detail, occurred_at from driver_violations
@@ -182,18 +208,26 @@ public class WorkReports {
 
     /** Newest first. open=true: only those admin has not resolved. */
     public List<Alert> alerts(boolean open, int limit) {
-        Timestamp todayStart = Timestamp.from(LocalDate.now(work.businessZone()).atStartOfDay(work.businessZone()).toInstant());
+        return alerts(open, limit, null);
+    }
+
+    public Alert alert(long id) {
+        return alerts(false, 1, id).stream().findFirst().orElseThrow();
+    }
+
+    private List<Alert> alerts(boolean open, int limit, Long id) {
+        Timestamp todayStart = Timestamp.from(time.dayStart(time.today()));
         Timestamp monthStart = Timestamp.from(Instant.now().minus(30, ChronoUnit.DAYS));
         return jdbc.sql("""
                 select a.*, u.name,
                   (select count(*) from driver_violations v where v.driver_id = a.driver_id and v.occurred_at >= :today) as today_count,
                   (select count(*) from driver_violations v where v.driver_id = a.driver_id and v.occurred_at >= :month) as month_count
                 from driver_alerts a join users u on u.id = a.driver_id
-                where (:open = false or a.resolved_at is null)
+                where (:open = false or a.resolved_at is null) and (cast(:id as bigint) is null or a.id = :id)
                 order by a.created_at desc, a.id desc
                 limit :limit
                 """)
-                .param("today", todayStart).param("month", monthStart).param("open", open).param("limit", limit)
+                .param("today", todayStart).param("month", monthStart).param("open", open).param("limit", limit).param("id", id)
                 .query((rs, row) -> new Alert(rs.getLong("id"), rs.getLong("driver_id"), rs.getString("name"),
                         rs.getString("kind"), (Long) rs.getObject("order_id"),
                         rs.getObject("day", LocalDate.class), rs.getInt("violation_count"), rs.getInt("today_count"),

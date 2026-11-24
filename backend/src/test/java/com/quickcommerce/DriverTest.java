@@ -7,10 +7,16 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.simple.JdbcClient;
 
 /** The driver side over real HTTP: account, job list, the delivery steps, and what each party may see. */
 class DriverTest extends ApiTestBase {
+
+    @Autowired
+    DataSource dataSource;
 
     static final String PHONE = "{\"phone\":\"+1 604 555 0142\"}";
 
@@ -247,6 +253,15 @@ class DriverTest extends ApiTestBase {
         assertEquals(429, post("/api/drivers/me/delivery/delivered", driver.token(), "{\"code\":\"" + code + "\"}").status(),
                 "after 5 tries even the right code is refused, so the code cannot be guessed");
         assertEquals("PICKED_UP", get("/api/orders/" + orderId, s.customer()).read("$.status"));
+
+        JdbcClient db = JdbcClient.create(dataSource);
+        assertEquals(5, db.sql("select delivery_code_attempts from orders where id = :id")
+                .param("id", orderId).query(Integer.class).single(), "wrong codes are recorded even when the API rejects them");
+        db.sql("update orders set delivery_code_window_expires_at = now() - interval '1 second' where id = :id")
+                .param("id", orderId).update();
+        assertEquals(200, post("/api/drivers/me/delivery/delivered", driver.token(), "{\"code\":\"" + code + "\"}").status());
+        assertEquals(1, db.sql("select delivery_code_attempts from orders where id = :id")
+                .param("id", orderId).query(Integer.class).single(), "expiry opens a fresh window");
     }
 
     @Test

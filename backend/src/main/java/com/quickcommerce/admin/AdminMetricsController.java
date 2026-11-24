@@ -1,8 +1,8 @@
 package com.quickcommerce.admin;
 
+import com.quickcommerce.common.DatabaseTime;
 import java.sql.Timestamp;
 import java.time.LocalDate;
-import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import javax.sql.DataSource;
@@ -87,27 +87,29 @@ public class AdminMetricsController {
             """;
 
     private final JdbcClient jdbc;
-    private final ZoneId zone;
+    private final String zone;
+    private final DatabaseTime time;
 
-    AdminMetricsController(DataSource dataSource, @Value("${app.business-time-zone}") String zone) {
+    AdminMetricsController(DataSource dataSource, DatabaseTime time, @Value("${app.business-time-zone}") String zone) {
         this.jdbc = JdbcClient.create(dataSource);
-        this.zone = ZoneId.of(zone);
+        this.time = time;
+        this.zone = zone;
     }
 
     /** One row per day from `from` to `to` (inclusive, at most 366 days). Default: the last 30 days. */
     @GetMapping("/api/admin/metrics")
     Metrics metrics(@RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to) {
-        LocalDate end = to != null ? to : LocalDate.now(zone);
+        LocalDate end = to != null ? to : time.today();
         LocalDate start = from != null ? from : end.minusDays(29);
         if (start.isAfter(end) || ChronoUnit.DAYS.between(start, end) > 365) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "from must be on or before to, at most 366 days apart");
         }
         int lateMinutes = jdbc.sql("select late_delivery_minutes from platform_settings where id = 1").query(Integer.class).single();
         List<Day> days = jdbc.sql(SQL)
-                .param("from", start).param("to", end).param("tz", zone.getId())
-                .param("fromTs", Timestamp.from(start.atStartOfDay(zone).toInstant()))
-                .param("toTs", Timestamp.from(end.plusDays(1).atStartOfDay(zone).toInstant()))
+                .param("from", start).param("to", end).param("tz", zone)
+                .param("fromTs", Timestamp.from(time.dayStart(start)))
+                .param("toTs", Timestamp.from(time.dayStart(end.plusDays(1))))
                 .param("lateMinutes", lateMinutes)
                 .query((rs, row) -> {
                     long sales = rs.getLong("sales");

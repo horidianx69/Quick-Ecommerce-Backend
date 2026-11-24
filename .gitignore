@@ -1,0 +1,10 @@
+# Secrets and local settings must never be committed.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.jks
+# Personal machine and IDE files
+.DS_Store
+.idea/workspace.xml

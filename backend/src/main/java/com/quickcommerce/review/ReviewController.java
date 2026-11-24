@@ -70,7 +70,7 @@ public class ReviewController {
     SubjectReviews forSubject(@RequestParam Subject subjectType, @RequestParam long subjectId,
             @RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "20") int size) {
         int limit = Math.clamp(size, 1, 100);
-        return reviews.forSubject(subjectType, subjectId, limit, Math.max(page, 0) * limit);
+        return reviews.forSubject(subjectType, subjectId, limit, (long) Math.max(page, 0) * limit);
     }
 
     @DeleteMapping("/api/admin/reviews/{id}")

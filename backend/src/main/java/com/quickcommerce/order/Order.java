@@ -25,7 +25,7 @@ public class Order {
      * (customer changed their mind) or EXPIRED (shop never answered).
      * A driver takes the order while it is ACCEPTED or READY, and sets PICKED_UP and DELIVERED.
      */
-    public enum Status { PLACED, ACCEPTED, READY, PICKED_UP, DELIVERED, REJECTED, CANCELLED, EXPIRED }
+    public enum Status { PAYMENT_PENDING, CAPTURE_PENDING, PLACED, ACCEPTED, READY, PICKED_UP, DELIVERED, REJECTED, CANCELLED, EXPIRED }
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -33,6 +33,8 @@ public class Order {
     private Long customerId;
     private Long shopId;
     private String idempotencyKey;
+    @Column(updatable = false)
+    private String checkoutFingerprint;
 
     /** Changed only by OrderRepository.move, one atomic step per change. Saving this entity never writes it. */
     @Enumerated(EnumType.STRING)
@@ -66,6 +68,8 @@ public class Order {
     private Long driverId;
     /** Four digits. The customer reads it to the driver at the door; the driver needs it to mark the order delivered. */
     private String deliveryCode;
+    private int deliveryCodeAttempts;
+    private Instant deliveryCodeWindowExpiresAt;
     @Column(updatable = false)
     private Instant deliveredAt;
     /** Why admin cancelled the order. Null when the customer cancelled, or the order was not cancelled. */

@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
@@ -17,6 +18,19 @@ import org.junit.jupiter.api.Test;
 class ShopBackendTest extends ApiTestBase {
 
     // ---------------------------------------------------------------- auth
+
+    @Test
+    void signupAndLoginAgreeOnEmailCaseAndSurroundingWhitespace() {
+        String email = "élise." + newEmail();
+        String uppercase = "  " + email.toUpperCase(Locale.ROOT) + "  ";
+        Res signup = post("/api/auth/signup", null, signupJson(uppercase, PASSWORD));
+        assertEquals(201, signup.status(), signup.body());
+        assertEquals(email, signup.read("$.user.email"));
+        assertEquals(409, post("/api/auth/signup", null, signupJson(email, PASSWORD)).status());
+        Res login = post("/api/auth/login", null, loginJson(uppercase, PASSWORD));
+        assertEquals(200, login.status(), login.body());
+        assertEquals(signup.<Number>read("$.user.id").longValue(), login.<Number>read("$.user.id").longValue());
+    }
 
     @Test
     void signupLoginAndMe() {

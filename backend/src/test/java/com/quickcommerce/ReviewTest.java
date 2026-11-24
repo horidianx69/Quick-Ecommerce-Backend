@@ -96,11 +96,11 @@ class ReviewTest extends ApiTestBase {
     @Test
     void tenReviewsAtOnceForOneOrderSaveOne() {
         Delivered d = delivered();
-        List<Res> results = parallel(10, i -> post("/api/orders/" + d.orderId() + "/reviews", d.scene().customer(),
-                "{\"shopStars\":" + (i % 5 + 1) + "}"));
+        String path = "/api/orders/" + d.orderId() + "/reviews";
+        List<Res> results = parallel(10, i -> post(path, d.scene().customer(),
+                i % 2 == 0 ? "{\"shopStars\":5}" : "{\"driverStars\":4}"));
         assertEquals(1, count(results, 201), ConcurrencyTest.statuses(results));
         assertEquals(9, count(results, 409));
-        assertEquals(1, get("/api/admin/reviews?subjectType=SHOP&subjectId=" + d.scene().shopId(), d.scene().admin())
-                .<Integer>read("$.rating.count"), "the average counts it once");
+        assertEquals(1, get(path, d.scene().customer()).<List<?>>read("$").size());
     }
 }

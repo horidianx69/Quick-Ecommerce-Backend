@@ -1,5 +1,6 @@
 package com.quickcommerce.dispatch;
 
+import com.quickcommerce.payment.OrderPayments;
 import com.quickcommerce.work.WorkReports;
 import com.quickcommerce.work.WorkReports.Alert;
 import com.quickcommerce.work.WorkReports.DriverPay;
@@ -32,9 +33,12 @@ public class AdminWorkController {
     private final WorkReports reports;
     private final DriverRepository drivers;
 
-    AdminWorkController(WorkReports reports, DriverRepository drivers) {
+    private final OrderPayments payments;
+
+    AdminWorkController(WorkReports reports, DriverRepository drivers, OrderPayments payments) {
         this.reports = reports;
         this.drivers = drivers;
+        this.payments = payments;
     }
 
     /** What each driver earned in a period. Default: the most recent period that has ended. */
@@ -51,6 +55,9 @@ public class AdminWorkController {
     @PostMapping("/api/admin/payouts/{driverId}/{periodStart}/paid")
     DriverPay markPaid(@PathVariable long driverId,
             @PathVariable @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate periodStart) {
+        if (payments.enabled()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Use the Stripe driver payout endpoint");
+        }
         return reports.markPaid(driverId, reports.periodStarting(periodStart));
     }
 
@@ -69,7 +76,7 @@ public class AdminWorkController {
             drivers.setStatus(driverId, Driver.Status.SUSPENDED);
             drivers.goOffline(driverId);
         }
-        return reports.alerts(false, 500).stream().filter(a -> a.id() == id).findFirst().orElseThrow();
+        return reports.alert(id);
     }
 
     @GetMapping("/api/admin/drivers/{userId}/violations")

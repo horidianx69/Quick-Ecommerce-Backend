@@ -51,14 +51,14 @@ public class Settings {
         }
 
         /** By the items subtotal: below the middle tier, the middle tier, or free. */
-        public int deliveryFee(int subtotalCents) {
+        public int deliveryFee(long subtotalCents) {
             if (subtotalCents >= freeDeliveryFromCents) {
                 return 0;
             }
             return subtotalCents >= deliveryMidFromCents ? deliveryFeeMidCents : deliveryFeeLowCents;
         }
 
-        public int smallCartFee(int subtotalCents) {
+        public int smallCartFee(long subtotalCents) {
             return subtotalCents < smallCartBelowCents ? smallCartFeeCents : 0;
         }
 

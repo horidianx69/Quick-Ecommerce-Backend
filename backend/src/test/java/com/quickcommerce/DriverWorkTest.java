@@ -8,8 +8,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.quickcommerce.common.Geo;
 import com.quickcommerce.common.Settings;
 import com.quickcommerce.work.DriverWork;
+import java.time.Instant;
 import java.time.LocalDate;
-import java.time.ZoneId;
 import java.util.List;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
@@ -209,7 +209,7 @@ class DriverWorkTest extends ApiTestBase {
         assertEquals(0, alertsFor(s, id).size(), "2 of 3: no alert yet");
         work.recordViolation(id, null, DriverWork.ViolationType.LATE_DELIVERY, "test", limits);
         assertEquals(List.of("DAILY_LIMIT"), alertsFor(s, id));
-        assertEquals(LocalDate.now(ZoneId.of("America/Vancouver")).toString(),
+        assertEquals(time.today().toString(),
                 get("/api/admin/driver-alerts", s.admin()).<List<String>>read("$[?(@.driverId == " + id + ")].day").get(0));
 
         // 3 more, at the same moment: still one daily alert, and exactly one ban review at 6.
@@ -278,11 +278,13 @@ class DriverWorkTest extends ApiTestBase {
 
     @Test
     void theMetricsAddUp() {
+        assertEquals(Instant.parse("2026-11-24T07:00:00Z"), time.dayStart(LocalDate.of(2026, 11, 24)),
+                "Vancouver midnight stays aligned with PostgreSQL after the November time zone change");
         Scene s = scene(10);
         long orderId = acceptedOrder(s, s.customer(), 2);
         deliverAll(s, s.customer(), orderId, driverNear(s));
 
-        String today = LocalDate.now(ZoneId.of("America/Vancouver")).toString();
+        String today = time.today().toString();
         Res metrics = get("/api/admin/metrics?from=" + today + "&to=" + today, s.admin());
         assertEquals(200, metrics.status(), metrics.body());
         assertEquals(1, metrics.<List<?>>read("$.days").size());

@@ -1,8 +1,10 @@
 package com.quickcommerce.catalog;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.stream.Collectors;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.stereotype.Service;
@@ -38,19 +40,32 @@ public class StockService {
         // rows in the same order, so they can never deadlock each other.
         for (var line : new TreeMap<>(quantities).entrySet()) {
             Long id = line.getKey();
-            if (shopProducts.changeStock(shopId, id, -line.getValue()) == 0) {
-                throw shopProducts.existsByIdAndShopId(id, shopId)
-                        ? problem(HttpStatus.CONFLICT, "Not enough stock", id)
-                        : problem(HttpStatus.BAD_REQUEST, "Product is not sold by this shop", id);
+            if (shopProducts.reserve(shopId, id, line.getValue()) == 0) {
+                if (!shopProducts.approvedViewsIn(shopId, List.of(id)).isEmpty()) {
+                    throw problem(HttpStatus.CONFLICT, "Not enough stock", id);
+                }
+                throw unavailable(shopId, id);
             }
         }
-        return shopProducts.viewsIn(shopId, quantities.keySet());
+        return shopProducts.approvedViewsIn(shopId, quantities.keySet());
     }
 
     /** The shop's products with today's price and stock, without taking anything. For price quotes. */
     @Transactional(readOnly = true)
-    public List<ShopProductView> peek(Long shopId, java.util.Collection<Long> shopProductIds) {
-        return shopProducts.viewsIn(shopId, shopProductIds);
+    public List<ShopProductView> peek(Long shopId, Collection<Long> shopProductIds) {
+        List<ShopProductView> found = shopProducts.approvedViewsIn(shopId, shopProductIds);
+        if (found.size() != shopProductIds.size()) {
+            var foundIds = found.stream().map(ShopProductView::id).collect(Collectors.toSet());
+            Long missing = shopProductIds.stream().filter(id -> !foundIds.contains(id)).min(Long::compareTo).orElseThrow();
+            throw unavailable(shopId, missing);
+        }
+        return found;
+    }
+
+    private ErrorResponseException unavailable(Long shopId, Long id) {
+        return shopProducts.existsByIdAndShopId(id, shopId)
+                ? problem(HttpStatus.CONFLICT, "Product is no longer available", id)
+                : problem(HttpStatus.BAD_REQUEST, "Product is not sold by this shop", id);
     }
 
     /** Gives units back. Does nothing if the shop has removed the product since. */
