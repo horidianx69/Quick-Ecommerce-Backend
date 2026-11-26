@@ -29,11 +29,11 @@ class AuthControllerTest {
         var http = new MockHttpServletRequest();
 
         var unknown = assertThrows(ResponseStatusException.class, () -> auth.login(
-                new AuthController.LoginRequest("unknown@example.test", "wrong-password"), http));
+                new AuthController.LoginRequest("unknown@example.test", "unknown-password"), http));
         var wrong = assertThrows(ResponseStatusException.class, () -> auth.login(
                 new AuthController.LoginRequest("exists@example.test", "wrong-password"), http));
 
-        verify(encoder).matches("wrong-password", "dummy-hash");
+        verify(encoder).matches("unknown-password", "dummy-hash");
         verify(encoder).matches("wrong-password", "account-hash");
         assertEquals(HttpStatus.UNAUTHORIZED, unknown.getStatusCode());
         assertEquals(unknown.getStatusCode(), wrong.getStatusCode());

@@ -11,6 +11,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.env.Environment;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
@@ -26,13 +27,13 @@ public class OrderPayments {
     record Payment(long orderId, UUID reference, Kind kind, State state, boolean live, long authorizedCents,
             Long captureCents, OffsetDateTime expiresAt, String returnUrl, String sessionId, String checkoutUrl,
             String intentId, String chargeId, String refundId, OffsetDateTime closingAt, OffsetDateTime captureUntil,
-            UUID leaseToken, int failures, String reviewReason) {}
+            UUID leaseToken, int failures, OffsetDateTime checkoutCompletedAt, String reviewReason, String reviewProviderState) {}
 
     public record CustomerPayment(State state, long authorizedCents, Long capturedCents, String currency,
             String checkoutUrl, OffsetDateTime checkoutExpiresAt) {}
 
     public record AdminPayment(State state, boolean live, long authorizedCents, Long captureCents,
-            String sessionId, String intentId, String chargeId, String refundId, String reviewReason) {}
+            String sessionId, String intentId, String chargeId, String refundId, String reviewReason, String reviewProviderState) {}
 
     public record PaymentReview(long orderId, Kind kind, boolean live, String reason) {}
 
@@ -41,8 +42,11 @@ public class OrderPayments {
     private final boolean live;
     private final String returnUrl;
 
-    OrderPayments(JdbcClient jdbc, @Value("${app.payments.enabled}") boolean enabled,
+    OrderPayments(JdbcClient jdbc, Environment environment, @Value("${app.payments.enabled}") boolean enabled,
             @Value("${app.payments.live}") boolean live, @Value("${app.payments.return-url}") String returnUrl) {
+        if (environment.matchesProfiles("prod") && (!enabled || !live)) {
+            throw new IllegalStateException("The prod profile requires STRIPE_ENABLED=true and STRIPE_LIVE=true");
+        }
         this.jdbc = jdbc;
         this.enabled = enabled;
         this.live = live;
@@ -90,7 +94,7 @@ public class OrderPayments {
     public void close(long orderId) {
         jdbc.sql("""
                 update order_payments set closing_at = coalesce(closing_at, now()), due_at = now()
-                where order_id = :id and kind = 'ORDER' and state in ('OPENING', 'OPEN', 'AUTHORIZED', 'CAPTURED')
+                where order_id = :id and kind = 'ORDER' and state in ('OPENING', 'OPEN', 'AUTHORIZED', 'CAPTURING', 'CAPTURED')
                 """).param("id", orderId).update();
     }
 
@@ -111,7 +115,7 @@ public class OrderPayments {
 
     public AdminPayment admin(long orderId, Kind kind) {
         return find(orderId, kind).map(p -> new AdminPayment(p.state(), p.live(), p.authorizedCents(), p.captureCents(),
-                p.sessionId(), p.intentId(), p.chargeId(), p.refundId(), p.reviewReason()))
+                p.sessionId(), p.intentId(), p.chargeId(), p.refundId(), p.reviewReason(), p.reviewProviderState()))
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Order payment not found"));
     }
 
@@ -157,7 +161,8 @@ public class OrderPayments {
                 on conflict (order_id, kind) do update set reference = excluded.reference, state = 'OPENING',
                     authorized_cents = excluded.authorized_cents, capture_cents = excluded.capture_cents,
                     expires_at = excluded.expires_at, return_url = excluded.return_url, due_at = now(),
-                    session_id = null, checkout_url = null, intent_id = null, closing_at = null, capture_until = null, review_reason = null
+                    session_id = null, checkout_url = null, intent_id = null, closing_at = null, capture_until = null, review_reason = null,
+                    checkout_completed_at = null, review_provider_state = null
                 where order_payments.state = 'VOIDED' and order_payments.live = excluded.live
                 """).param("id", orderId).param("reference", UUID.randomUUID()).param("live", live).param("cents", cents)
                 .param("deadline", lastTipAt.atOffset(ZoneOffset.UTC)).param("url", returnUrl).update();
@@ -178,19 +183,23 @@ public class OrderPayments {
         }
     }
 
-    public List<Long> expiredUnpaid() {
+    public List<Long> expiredUnopened() {
         return jdbc.sql("""
                 select p.order_id from order_payments p join orders o on o.id = p.order_id
-                where p.kind = 'ORDER' and p.state in ('OPENING', 'OPEN') and p.expires_at <= now() and o.status = 'PAYMENT_PENDING'
+                where p.kind = 'ORDER' and p.state = 'OPENING' and p.expires_at <= now() and o.status = 'PAYMENT_PENDING'
                 order by p.order_id limit 200
                 """).query(Long.class).list();
     }
 
-    void wake(String sessionId, boolean live) {
+    void wake(String sessionId, boolean live, Instant completedAt) {
         jdbc.sql("""
-                update order_payments set due_at = now(), webhook_pending = true
-                where session_id = :session and live = :live and state = 'OPEN' and not webhook_pending
-                """).param("session", sessionId).param("live", live).update();
+                update order_payments set due_at = now(), webhook_pending = true,
+                    checkout_completed_at = least(checkout_completed_at, cast(:completed as timestamptz))
+                where session_id = :session and live = :live and state = 'OPEN'
+                    and (not webhook_pending or cast(:completed as timestamptz) < checkout_completed_at
+                        or (checkout_completed_at is null and cast(:completed as timestamptz) is not null))
+                """).param("session", sessionId).param("live", live)
+                .param("completed", completedAt == null ? null : completedAt.atOffset(ZoneOffset.UTC)).update();
     }
 
     Optional<Payment> claim(boolean live) {
@@ -230,12 +239,30 @@ public class OrderPayments {
                 .param("refund", refund).param("delay", delaySeconds).param("reason", reviewReason).update();
     }
 
+    void recordFinalizationReview(Payment p, State providerState, String session, String intent,
+            String charge, String refund) {
+        jdbc.sql("""
+                update order_payments set state = 'REVIEW_REQUIRED', review_reason = 'LOCAL_FINALIZATION_FAILED',
+                    review_provider_state = :providerState, session_id = coalesce(:session, session_id),
+                    intent_id = coalesce(:intent, intent_id), charge_id = coalesce(:charge, charge_id),
+                    refund_id = coalesce(:refund, refund_id), checkout_url = null,
+                    due_at = null, lease_until = null, lease_token = null
+                where reference = :id and lease_token = :lease
+                """).param("id", p.reference()).param("lease", p.leaseToken()).param("providerState", providerState.name())
+                .param("session", session).param("intent", intent).param("charge", charge).param("refund", refund).update();
+    }
+
     void retry(Payment p) {
+        retry(p, null);
+    }
+
+    void retry(Payment p, String confirmedCharge) {
         jdbc.sql("""
                 update order_payments set lease_until = null, lease_token = null, failures = failures + 1,
-                    due_at = now() + make_interval(secs => :delay)
+                    charge_id = coalesce(:charge, charge_id), due_at = now() + make_interval(secs => :delay)
                 where reference = :id and lease_token = :lease
                 """).param("id", p.reference()).param("lease", p.leaseToken())
+                .param("charge", confirmedCharge)
                 .param("delay", Math.min(60, 1 << Math.min(p.failures() + 1, 6)) + ThreadLocalRandom.current().nextInt(3)).update();
     }
 
@@ -247,6 +274,7 @@ public class OrderPayments {
                 rs.getString("intent_id"), rs.getString("charge_id"), rs.getString("refund_id"),
                 rs.getObject("closing_at", OffsetDateTime.class), rs.getObject("capture_until", OffsetDateTime.class),
                 rs.getObject("lease_token", UUID.class),
-                rs.getInt("failures"), rs.getString("review_reason"));
+                rs.getInt("failures"), rs.getObject("checkout_completed_at", OffsetDateTime.class),
+                rs.getString("review_reason"), rs.getString("review_provider_state"));
     }
 }

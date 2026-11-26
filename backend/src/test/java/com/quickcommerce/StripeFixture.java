@@ -9,7 +9,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import tools.jackson.databind.json.JsonMapper;
@@ -19,6 +21,18 @@ import tools.jackson.databind.node.ObjectNode;
 final class StripeFixture implements AutoCloseable {
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
+
+    record PauseCapture(CountDownLatch requested, CountDownLatch proceed) {
+        PauseCapture() {
+            this(new CountDownLatch(1), new CountDownLatch(1));
+        }
+    }
+
+    private record RequestParameters(String path, Map<String, String> form) {}
+
+    private static final class RequestHistory {
+        private RequestParameters executed;
+    }
 
     static final class Checkout {
         final String suffix = UUID.randomUUID().toString().replace("-", "");
@@ -37,6 +51,7 @@ final class StripeFixture implements AutoCloseable {
         volatile boolean intentUnavailable;
         volatile boolean wrongCurrency;
         volatile boolean loseCaptureResponse;
+        volatile PauseCapture pauseCapture;
         volatile boolean loseRefundResponse;
 
         Checkout(String reference, long amount) {
@@ -81,6 +96,7 @@ final class StripeFixture implements AutoCloseable {
     private final Map<String, Checkout> sessions = new ConcurrentHashMap<>();
     private final Map<String, Checkout> intents = new ConcurrentHashMap<>();
     private final Map<String, Checkout> charges = new ConcurrentHashMap<>();
+    private final Map<String, RequestHistory> requests = new ConcurrentHashMap<>();
     private final Map<String, ObjectNode> idempotent = new ConcurrentHashMap<>();
     private final Map<String, ObjectNode> refundsByIntent = new ConcurrentHashMap<>();
     private final Map<String, ObjectNode> transfersByGroup = new ConcurrentHashMap<>();
@@ -89,6 +105,7 @@ final class StripeFixture implements AutoCloseable {
     final AtomicInteger maxOpenConcurrency = new AtomicInteger();
     final AtomicInteger transfers = new AtomicInteger();
     final AtomicBoolean loseTransferResponse = new AtomicBoolean();
+    final AtomicBoolean partiallyReverseTransferAfterLoss = new AtomicBoolean();
     private final AtomicInteger opening = new AtomicInteger();
 
     StripeFixture() throws IOException {
@@ -114,54 +131,73 @@ final class StripeFixture implements AutoCloseable {
             if ("GET".equals(method) && request.getRequestURI().getRawQuery() != null) {
                 decode(request.getRequestURI().getRawQuery(), form);
             }
+            if (!"POST".equals(method)) {
+                route(request, path, method, form, null);
+                return;
+            }
             String key = request.getRequestHeaders().getFirst("Idempotency-Key");
-            if ("POST".equals(method) && (key == null || !key.startsWith("quike-"))) {
+            if (key == null || !key.startsWith("quike-")) {
                 error(request, 400, "Missing application idempotency key");
                 return;
             }
-            if ("POST".equals(method) && cachedFailures.contains(key)) {
-                error(request, 500, "Cached uncertain provider response");
-                return;
-            }
-            if ("POST".equals(method) && idempotent.containsKey(key)) {
-                reply(request, 200, idempotent.get(key));
-                return;
-            }
-            switch (path[0]) {
-                case "checkout" -> handleCheckout(request, path, form, key);
-                case "payment_intents" -> handleIntent(request, path, form, key);
-                case "charges" -> {
-                    var charge = charges.get(path[1]);
-                    if (charge == null) {
-                        error(request, 404, "Unknown charge");
-                        return;
-                    }
-                    reply(request, 200, JSON.createObjectNode().put("object", "charge").put("id", charge.charge)
-                            .put("livemode", false).put("currency", "cad").put("paid", true)
-                            .put("captured", true).put("disputed", false).put("amount_captured", charge.received)
-                            .put("amount_refunded", charge.externalRefundedCents));
-                }
-                case "refunds" -> {
-                    if ("GET".equals(method)) {
-                        list(request, refundsByIntent.get(form.get("payment_intent")));
-                    } else {
-                        refund(request, form, key);
+            var current = new RequestParameters(request.getRequestURI().getPath(), Map.copyOf(form));
+            var history = requests.computeIfAbsent(key, ignored -> new RequestHistory());
+            synchronized (history) {
+                if (history.executed != null && !current.equals(history.executed)) {
+                    error(request, 400, "Parameters changed for a reused idempotency key");
+                } else if (cachedFailures.contains(key)) {
+                    error(request, 500, "Cached uncertain provider response");
+                } else if (idempotent.containsKey(key)) {
+                    reply(request, 200, idempotent.get(key));
+                } else {
+                    try {
+                        route(request, path, method, form, key);
+                    } finally {
+                        if (cachedFailures.contains(key) || idempotent.containsKey(key)) {
+                            history.executed = current;
+                        }
                     }
                 }
-                case "accounts" -> {
-                    var data = JSON.createObjectNode().put("id", path[1]).put("object", "account").put("country", "CA");
-                    data.putObject("capabilities").put("transfers", "active");
-                    reply(request, 200, data);
-                }
-                case "transfers" -> {
-                    if ("GET".equals(method)) {
-                        list(request, transfersByGroup.get(form.get("transfer_group")));
-                    } else {
-                        transfer(request, form, key);
-                    }
-                }
-                default -> error(request, 404, "Unknown resource");
             }
+        }
+    }
+
+    private void route(HttpExchange request, String[] path, String method, Map<String, String> form, String key)
+            throws IOException {
+        switch (path[0]) {
+            case "checkout" -> handleCheckout(request, path, form, key);
+            case "payment_intents" -> handleIntent(request, path, form, key);
+            case "charges" -> {
+                var charge = charges.get(path[1]);
+                if (charge == null) {
+                    error(request, 404, "Unknown charge");
+                    return;
+                }
+                reply(request, 200, JSON.createObjectNode().put("object", "charge").put("id", charge.charge)
+                        .put("livemode", false).put("currency", "cad").put("paid", true)
+                        .put("captured", true).put("disputed", false).put("amount_captured", charge.received)
+                        .put("amount_refunded", charge.externalRefundedCents));
+            }
+            case "refunds" -> {
+                if ("GET".equals(method)) {
+                    list(request, refundsByIntent.get(form.get("payment_intent")));
+                } else {
+                    refund(request, form, key);
+                }
+            }
+            case "accounts" -> {
+                var data = JSON.createObjectNode().put("id", path[1]).put("object", "account").put("country", "CA");
+                data.putObject("capabilities").put("transfers", "active");
+                reply(request, 200, data);
+            }
+            case "transfers" -> {
+                if ("GET".equals(method)) {
+                    list(request, transfersByGroup.get(form.get("transfer_group")));
+                } else {
+                    transfer(request, form, key);
+                }
+            }
+            default -> error(request, 404, "Unknown resource");
         }
     }
 
@@ -235,6 +271,19 @@ final class StripeFixture implements AutoCloseable {
                         error(request, 400, "Multi-capture parameter was sent to a single-capture payment");
                         return;
                     }
+                    var pause = checkout.pauseCapture;
+                    if (pause != null) {
+                        pause.requested().countDown();
+                        try {
+                            if (!pause.proceed().await(5, TimeUnit.SECONDS)) {
+                                error(request, 503, "Capture fixture pause expired");
+                                return;
+                            }
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new IOException(e);
+                        }
+                    }
                     checkout.received = Long.parseLong(form.get("amount_to_capture"));
                     checkout.intentState = "succeeded";
                     checkout.captures.incrementAndGet();
@@ -245,6 +294,7 @@ final class StripeFixture implements AutoCloseable {
                 idempotent.put(key, checkout.intentJson());
                 if ("capture".equals(path[2]) && checkout.loseCaptureResponse) {
                     checkout.loseCaptureResponse = false;
+                    cachedFailures.add(key);
                     error(request, 500, "Capture completed before connection failure");
                     return;
                 }
@@ -285,7 +335,8 @@ final class StripeFixture implements AutoCloseable {
         var data = JSON.createObjectNode().put("id", "tr_" + UUID.randomUUID()).put("object", "transfer")
                 .put("destination", form.get("destination")).put("amount", Long.parseLong(form.get("amount")))
                 .put("source_transaction", form.get("source_transaction")).put("currency", "cad")
-                .put("livemode", false).put("reversed", false).put("transfer_group", form.get("transfer_group"));
+                .put("livemode", false).put("reversed", false).put("amount_reversed", 0)
+                .put("transfer_group", form.get("transfer_group"));
         data.putObject("metadata").put("quike_transfer", form.get("metadata[quike_transfer]"));
         var existing = idempotent.putIfAbsent(key, data);
         if (existing == null) {
@@ -293,6 +344,9 @@ final class StripeFixture implements AutoCloseable {
             transfersByGroup.put(form.get("transfer_group"), data);
             if (loseTransferResponse.compareAndSet(true, false)) {
                 cachedFailures.add(key);
+                if (partiallyReverseTransferAfterLoss.compareAndSet(true, false)) {
+                    data.put("amount_reversed", 100);
+                }
                 error(request, 500, "Transfer completed before connection failure");
                 return;
             }

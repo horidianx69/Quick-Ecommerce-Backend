@@ -92,7 +92,8 @@ public class OrderService {
     static final List<Status> WAITING_FOR_PICKUP = List.of(Status.ACCEPTED, Status.READY);
     static final List<Status> WITH_A_DRIVER = List.of(Status.ACCEPTED, Status.READY, Status.PICKED_UP);
     /** Not finished yet: admin can still cancel these. */
-    static final List<Status> ACTIVE = List.of(Status.PAYMENT_PENDING, Status.PLACED, Status.ACCEPTED, Status.READY, Status.PICKED_UP);
+    static final List<Status> ACTIVE = List.of(Status.PAYMENT_PENDING, Status.PLACED, Status.CAPTURE_PENDING,
+            Status.ACCEPTED, Status.READY, Status.PICKED_UP);
     static final int DELIVERY_CODE_TRIES = 5;
     private static final Duration DELIVERY_CODE_WINDOW = Duration.ofMinutes(15);
 
@@ -356,8 +357,8 @@ public class OrderService {
     }
 
     // Payment worker calls these with the order row locked in its finalization transaction.
-    public void confirmAuthorization(long orderId, Instant authorizedAt) {
-        orders.authorizePayment(orderId, Status.PAYMENT_PENDING, Status.PLACED, authorizedAt);
+    public void confirmAuthorization(long orderId, Instant placedAt) {
+        orders.authorizePayment(orderId, Status.PAYMENT_PENDING, Status.PLACED, placedAt);
     }
 
     public void confirmCapture(long orderId) {
@@ -579,7 +580,7 @@ public class OrderService {
     @Scheduled(fixedDelayString = "${app.orders.expiry-check-ms}")
     public void expireOverdue() {
         expirePlacedBefore(Instant.now().minus(acceptTimeout));
-        for (Long orderId : payments.expiredUnpaid()) {
+        for (Long orderId : payments.expiredUnopened()) {
             expiryTransaction.executeWithoutResult(tx ->
                     orders.findWithLockById(orderId).ifPresent(order -> expirePaymentOrder(order, Status.PAYMENT_PENDING)));
         }

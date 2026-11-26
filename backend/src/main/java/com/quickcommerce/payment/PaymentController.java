@@ -132,7 +132,16 @@ class PaymentController {
                 if (session.length() > 255 || !session.startsWith(live ? "cs_live_" : "cs_test_")) {
                     throw invalidEvent();
                 }
-                payments.wake(session, live);
+                Instant completedAt = null;
+                if ("checkout.session.completed".equals(type)) {
+                    var created = event.path("created");
+                    long completion = created.asLong(-1);
+                    if (!created.isIntegralNumber() || completion <= 0 || completion > signedAt + SIGNATURE_TOLERANCE_SECONDS) {
+                        throw invalidEvent();
+                    }
+                    completedAt = Instant.ofEpochSecond(completion);
+                }
+                payments.wake(session, live, completedAt);
             }
         } catch (SignatureVerificationException | JacksonException | IllegalArgumentException | IndexOutOfBoundsException e) {
             throw invalidEvent();
