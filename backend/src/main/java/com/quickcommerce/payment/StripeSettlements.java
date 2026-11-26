@@ -215,6 +215,7 @@ public class StripeSettlements {
                         && job.account().equals(transfer.getDestination())
                         && Objects.equals(job.sourceCharge(), transfer.getSourceTransaction())
                         && group.equals(transfer.getTransferGroup()) && Boolean.FALSE.equals(transfer.getReversed())
+                        && Objects.equals(0L, transfer.getAmountReversed())
                         && transfer.getMetadata() != null && info.id().toString().equals(transfer.getMetadata().get("quike_transfer"));
                 finish(job, valid ? State.TRANSFERRED : State.REVIEW_REQUIRED, transfer.getId(),
                         valid ? null : "UNEXPECTED_STRIPE_TRANSFER");

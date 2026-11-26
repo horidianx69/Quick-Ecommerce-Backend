@@ -6,17 +6,20 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import com.quickcommerce.order.OrderService;
 import com.stripe.StripeClient;
 import com.stripe.net.Webhook;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
@@ -62,6 +65,9 @@ class StripePaymentTest extends ApiTestBase {
 
     @Autowired
     JdbcClient jdbc;
+
+    @Autowired
+    OrderService orders;
 
     @Test
     void aCheckoutIsPrivateAndWebhookSignalsCannotAuthorizeAnUnpaidOrder() throws Exception {
@@ -117,9 +123,11 @@ class StripePaymentTest extends ApiTestBase {
         assertEquals(17, count(results, 409));
         await(() -> status(id, customer), "ACCEPTED");
         Res accepted = get("/api/orders/" + id, customer);
-        long total = accepted.<Number>read("$.totalCents").longValue();
-        assertTrue(total < checkout.amount);
-        assertEquals(total, checkout.received);
+        assertEquals(List.of(missing.intValue()), accepted.<List<Integer>>read("$.items[?(@.unavailable == true)].id"));
+        long remaining = 2L * placed.<Number>read("$.items[0].unitPriceCents").longValue();
+        long feesAndTip = placed.<Number>read("$.totalCents").longValue() - placed.<Number>read("$.subtotalCents").longValue();
+        assertEquals(remaining + feesAndTip, checkout.received);
+        assertEquals(remaining + feesAndTip, accepted.<Number>read("$.totalCents").longValue());
         assertEquals(1, checkout.captures.get());
 
         checkout.loseRefundResponse = true;
@@ -169,7 +177,7 @@ class StripePaymentTest extends ApiTestBase {
 
         long lateId = order(customer, stocked.shopId(), item(stocked.rowId(), 2)).id();
         var late = opened(lateId, customer);
-        jdbc.sql("update order_payments set expires_at = now() - interval '1 second' where order_id = :id")
+        jdbc.sql("update order_payments set expires_at = now() - interval '2 seconds' where order_id = :id")
                 .param("id", lateId).update();
         late.authorize();
         assertEquals(204, webhook(event(late.session, false)).status());
@@ -177,6 +185,102 @@ class StripePaymentTest extends ApiTestBase {
         await(() -> get(paymentPath(lateId), customer).read("$.state"), "VOIDED");
         assertEquals(1, late.voids.get());
         assertEquals(12, stockOf(stocked.shop(), stocked.rowId()));
+    }
+
+    @Test
+    void aDelayedSignedCompletionStillStartsTheShopWindow() throws Exception {
+        var stocked = stockedShop(adminToken(), 700, 12);
+        String customer = customer();
+        long id = order(customer, stocked.shopId(), item(stocked.rowId(), 2)).id();
+        var checkout = opened(id, customer);
+        checkout.authorize();
+        jdbc.sql("""
+                update order_payments set expires_at = now() - interval '15 seconds', due_at = now()
+                where order_id = :id
+                """).param("id", id).update();
+        orders.expireOverdue();
+        assertEquals("PAYMENT_PENDING", status(id, customer));
+        assertEquals(10, stockOf(stocked.shop(), stocked.rowId()));
+        assertEquals(204, webhook(event(checkout.session, false, Instant.now().minusSeconds(20))).status());
+        await(() -> status(id, customer), "PLACED");
+        var placedAt = Instant.parse(get("/api/orders/" + id, customer).read("$.createdAt"));
+        assertTrue(placedAt.isAfter(Instant.now().minusSeconds(10)));
+        assertEquals(0, checkout.voids.get());
+    }
+
+    @Test
+    void adminCanCancelBeforeCaptureAndReleaseTheHold() throws Exception {
+        var stocked = stockedShop(adminToken(), 900, 8);
+        String customer = customer();
+        long id = order(customer, stocked.shopId(), item(stocked.rowId(), 2)).id();
+        var checkout = authorize(id, customer);
+        jdbc.sql("update order_payments set lease_until = now() + interval '1 hour' where order_id = :id")
+                .param("id", id).update();
+        assertEquals("CAPTURE_PENDING", post("/api/shops/me/orders/" + id + "/accept", stocked.shop(), null).read("$.status"));
+        assertEquals("CANCELLED", adminCancel(id).read("$.status"));
+        jdbc.sql("update order_payments set lease_until = null where order_id = :id").param("id", id).update();
+        await(() -> get(paymentPath(id), customer).read("$.state"), "VOIDED");
+        assertEquals(1, checkout.voids.get());
+        assertEquals(0, checkout.captures.get());
+        assertEquals(8, stockOf(stocked.shop(), stocked.rowId()));
+    }
+
+    @Test
+    void adminCancellationDuringAProviderCaptureRefundsOnce() throws Exception {
+        var stocked = stockedShop(adminToken(), 900, 8);
+        String customer = customer();
+        long id = order(customer, stocked.shopId(), item(stocked.rowId(), 2)).id();
+        var checkout = authorize(id, customer);
+        var pause = new StripeFixture.PauseCapture();
+        checkout.pauseCapture = pause;
+        try {
+            assertEquals(200, post("/api/shops/me/orders/" + id + "/accept", stocked.shop(), null).status());
+            assertTrue(pause.requested().await(8, TimeUnit.SECONDS));
+            assertEquals("CANCELLED", adminCancel(id).read("$.status"));
+        } finally {
+            pause.proceed().countDown();
+        }
+        await(() -> get(paymentPath(id), customer).read("$.state"), "REFUNDED");
+        assertEquals("CANCELLED", status(id, customer));
+        assertEquals(1, checkout.captures.get());
+        assertEquals(1, checkout.refunds.get());
+        assertEquals(8, stockOf(stocked.shop(), stocked.rowId()));
+    }
+
+    @Test
+    void preservesConfirmedProviderCaptureWhenTheOrderWriteKeepsFailing() throws Exception {
+        String admin = adminToken();
+        var stocked = stockedShop(admin, 900, 8);
+        String customer = customer();
+        long id = order(customer, stocked.shopId(), item(stocked.rowId(), 2)).id();
+        var checkout = authorize(id, customer);
+        var path = "/api/admin/orders/" + id + "/payment";
+        jdbc.sql("alter table orders add constraint reject_test_capture check (id <> " + id + " or status <> 'ACCEPTED')").update();
+        try {
+            assertEquals(200, post("/api/shops/me/orders/" + id + "/accept", stocked.shop(), null).status());
+            await(() -> get(path, admin).read("$.chargeId"), checkout.charge);
+            checkout.intentUnavailable = true;
+            await(() -> jdbc.sql("""
+                    update order_payments set capture_until = now() - interval '16 minutes', due_at = now()
+                    where order_id = :id and state = 'CAPTURING' and failures > 0 and lease_token is null
+                    """).param("id", id).update(), 1);
+            await(() -> get(path, admin).read("$.state"), "REVIEW_REQUIRED");
+            var details = get(path, admin);
+            assertEquals("LOCAL_FINALIZATION_FAILED", details.read("$.reviewReason"));
+            assertEquals("CAPTURED", details.read("$.reviewProviderState"));
+            assertEquals(checkout.charge, details.read("$.chargeId"));
+            assertEquals(1, checkout.captures.get());
+            assertEquals("CAPTURE_PENDING", status(id, customer));
+            assertEquals(409, post("/api/shops/me/orders/" + id + "/ready", stocked.shop(), null).status());
+        } finally {
+            jdbc.sql("alter table orders drop constraint reject_test_capture").update();
+        }
+    }
+
+    private Res adminCancel(long id) {
+        Res response = post("/api/admin/orders/" + id + "/cancel", adminToken(), "{\"reason\":\"Sandbox test cancellation\"}");
+        assertEquals(200, response.status(), response.body());
+        return response;
     }
 
     @Test
@@ -313,8 +417,9 @@ class StripePaymentTest extends ApiTestBase {
                 stripe.opens.get() - opensBefore, stripe.maxOpenConcurrency.get(), (System.nanoTime() - started) / 1_000_000);
     }
 
-    @Test
-    void onlyAdminCanQueueOneConnectTransferPerDeliveredOrderAndDriverPeriod() throws Exception {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void adminQueuesOneConnectTransferAndReconcilesPartialReversals(boolean partiallyReversed) throws Exception {
         Scene s = scene(12);
         DriverAt driver = driverNear(s);
         Res placed = post("/api/orders", s.customer(),
@@ -329,9 +434,9 @@ class StripePaymentTest extends ApiTestBase {
         assertEquals(403, post(shopTransfer, s.shop(), null).status());
         assertEquals(409, post(shopTransfer, s.admin(), null).status());
         assertEquals(204, put("/api/admin/stripe/recipients/SHOP/" + s.shopId(), s.admin(),
-                "{\"accountId\":\"acct_shopFixture01\"}").status());
+                "{\"accountId\":\"acct_shopFixture" + s.shopId() + "0000\"}").status());
         assertEquals(204, put("/api/admin/stripe/recipients/DRIVER/" + driver.userId(), s.admin(),
-                "{\"accountId\":\"acct_driverFixture01\"}").status());
+                "{\"accountId\":\"acct_driverFixture" + driver.userId() + "0000\"}").status());
         assertEquals(409, put("/api/admin/stripe/recipients/DRIVER/" + driver.userId(), s.admin(),
                 "{\"accountId\":\"acct_otherFixture01\"}").status());
         deliver(s, driver, orderId);
@@ -361,13 +466,29 @@ class StripePaymentTest extends ApiTestBase {
                 """).param("id", orderId).update();
         String period = get("/api/drivers/me/pay-statements?count=2", driver.token()).read("$[1].period.start");
         String driverTransfer = "/api/admin/stripe/driver-payouts/" + driver.userId() + "/" + period;
+        if (partiallyReversed) {
+            stripe.loseTransferResponse.set(true);
+            stripe.partiallyReverseTransferAfterLoss.set(true);
+        }
         var all = parallel(10, n -> post(driverTransfer, s.admin(), null));
         assertEquals(10, count(all, 202));
         String paid = all.getFirst().read("$.id");
         assertTrue(all.stream().allMatch(res -> paid.equals(res.read("$.id"))));
-        await(() -> get("/api/admin/stripe/transfers/" + paid, s.admin()).read("$.state"), "TRANSFERRED");
-        assertEquals(500, jdbc.sql("select amount_cents from driver_payouts where driver_id = :id")
-                .param("id", driver.userId()).query(Integer.class).single());
+        String transferPath = "/api/admin/stripe/transfers/" + paid;
+        if (partiallyReversed) {
+            await(() -> jdbc.sql("""
+                    update stripe_transfers set due_at = now() where id = :id and lease_token is null
+                        and first_attempt_at is not null and state = 'QUEUED'
+                    """).param("id", UUID.fromString(paid)).update(), 1);
+            await(() -> get(transferPath, s.admin()).read("$.state"), "REVIEW_REQUIRED");
+            assertEquals("UNEXPECTED_STRIPE_TRANSFER", get(transferPath, s.admin()).read("$.reviewReason"));
+            assertTrue(jdbc.sql("select amount_cents from driver_payouts where driver_id = :id")
+                    .param("id", driver.userId()).query(Integer.class).optional().isEmpty());
+        } else {
+            await(() -> get(transferPath, s.admin()).read("$.state"), "TRANSFERRED");
+            assertEquals(500, jdbc.sql("select amount_cents from driver_payouts where driver_id = :id")
+                    .param("id", driver.userId()).query(Integer.class).single());
+        }
         assertEquals(transfersBefore + 2, stripe.transfers.get());
     }
 
@@ -470,10 +591,14 @@ class StripePaymentTest extends ApiTestBase {
     }
 
     private static String event(String session, boolean live) {
+        return event(session, live, Instant.now());
+    }
+
+    private static String event(String session, boolean live, Instant created) {
         return """
-                {"id":"evt_local_checkout","type":"checkout.session.completed","livemode":%s,
+                {"id":"evt_local_checkout","type":"checkout.session.completed","livemode":%s,"created":%d,
                  "data":{"object":{"id":"%s","object":"checkout.session"}}}
-                """.formatted(live, session);
+                """.formatted(live, created.getEpochSecond(), session);
     }
 
     private Res webhookUnchecked(String payload) {
@@ -498,6 +623,7 @@ class StripePaymentTest extends ApiTestBase {
                         payload.getBytes(java.nio.charset.StandardCharsets.UTF_8)))
                 : HttpRequest.BodyPublishers.ofString(payload);
         var response = http.send(HttpRequest.newBuilder(URI.create("http://localhost:" + port + WEBHOOK))
+                .timeout(Duration.ofSeconds(10))
                 .header("Content-Type", "application/json").header("Stripe-Signature", signature)
                 .POST(body).build(), HttpResponse.BodyHandlers.ofString());
         return new Res(response.statusCode(), response.body(), response.headers());

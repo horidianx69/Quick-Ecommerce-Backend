@@ -2,6 +2,7 @@ package com.quickcommerce.catalog;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.Set;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
@@ -53,10 +54,11 @@ public class StockService {
     /** The shop's products with today's price and stock, without taking anything. For price quotes. */
     @Transactional(readOnly = true)
     public List<ShopProductView> peek(Long shopId, Collection<Long> shopProductIds) {
-        List<ShopProductView> found = shopProducts.approvedViewsIn(shopId, shopProductIds);
-        if (found.size() != shopProductIds.size()) {
+        var requested = Set.copyOf(shopProductIds);
+        List<ShopProductView> found = shopProducts.approvedViewsIn(shopId, requested);
+        if (found.size() != requested.size()) {
             var foundIds = found.stream().map(ShopProductView::id).collect(Collectors.toSet());
-            Long missing = shopProductIds.stream().filter(id -> !foundIds.contains(id)).min(Long::compareTo).orElseThrow();
+            Long missing = requested.stream().filter(id -> !foundIds.contains(id)).min(Long::compareTo).orElseThrow();
             throw unavailable(shopId, missing);
         }
         return found;

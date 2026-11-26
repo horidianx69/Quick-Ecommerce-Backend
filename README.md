@@ -62,6 +62,7 @@ QuikE serves independent Canadian shops, customers, drivers and admins. This bac
 | Admin | Dashboard, daily charts data, order board, cancel, assign drivers by hand, every price, fee, pay and violation setting, driver alerts, pay periods, reviews |
 | Payments | Stripe Checkout card authorization, adjusted capture after shop acceptance, voids and cancellation refunds, separate post-delivery tips, and admin-triggered Stripe Connect transfers |
 | Payment recovery | PostgreSQL worker claims, Stripe idempotency keys, bounded retries, and admin review when a payment or transfer remains unresolved |
+| CodeRabbit follow-up | Addressed all 11 findings from the review of PR #5. Changes cover Checkout timing, capture cancellation and recovery, partially reversed transfers, stock lookups and payment and login tests. |
 | Security and concurrency | Request and checkout limits, stock and order race protection, idempotency key validation, delivery-code throttling, HS256 token verification and security headers |
 | Web app (`frontend/`) | Landing page; customer shopping, checkout, orders and live tracking; shop orders, products and profile; rider jobs, pickup and delivery; full admin console. Sign-up for riders and shop owners with a "pending review" screen until approved |
 
@@ -215,7 +216,7 @@ The customer can cancel in `PAYMENT_PENDING` or `PLACED`. A shop can reject a `P
 
 Each step works only from the step before. Steps cannot be skipped or done twice.
 
-Admins can cancel unfinished orders outside `CAPTURE_PENDING` or assign a driver before pickup. Cancellation restores remaining stock before pickup. During `CAPTURE_PENDING`, wait for the payment to resolve before attempting another action.
+Admins can cancel unfinished orders, including `CAPTURE_PENDING`, or assign a driver before pickup. Cancellation restores remaining stock before pickup. The payment worker voids an outstanding authorization or refunds a confirmed charge once Stripe resolves the capture.
 
 ### Prices
 
@@ -440,7 +441,7 @@ POST /api/shops/me/orders/7/accept       { "unavailableItemIds": [12] }
 | `PUT` | `/api/admin/shops/{id}/hours` | Replace the shop's opening hours for the whole week. |
 | `GET` | `/api/admin/orders` | Every order, newest first. Filters: `status`, `shopId`, `customerId`, `driverId`, `needsDriver=true`. |
 | `GET` | `/api/admin/orders/{id}` | One order with everything: both prices, every fee, tip, shop payout, item margin, driver pay, net, all three parties. |
-| `POST` | `/api/admin/orders/{id}/cancel` | Cancel an unfinished order with a reason. While capture is processing, poll payment state and retry when it resolves. |
+| `POST` | `/api/admin/orders/{id}/cancel` | Cancel an unfinished order with a reason, including during capture. Poll payment state to follow the void or refund. |
 | `POST` | `/api/admin/orders/{orderId}/assign` | Give an order waiting for pickup to an approved driver (replaces any driver it had). |
 | `POST` | `/api/admin/orders/{orderId}/unassign` | Take it off its driver before pickup; it goes back to the job list. |
 | `GET` | `/api/admin/settings` | Every setting (see [What admin can change](#what-admin-can-change)) and the per-category markups. |
@@ -800,6 +801,8 @@ Prices, fees, driver pay, violation limits and opening hours are not configurati
 
 Set `STRIPE_ENABLED=true`, `STRIPE_API_KEY`, `STRIPE_WEBHOOK_SECRET` and `STRIPE_RETURN_URL` in the backend environment. `STRIPE_LIVE` defaults to `false`. Use a dedicated database for sandbox orders and payouts. Set the return URL to a frontend page that accepts `orderId` and optionally `kind=tip`. Use HTTPS for deployed environments. Local HTTP is supported in sandbox mode.
 
+Production deployments should set `SPRING_PROFILES_ACTIVE=prod`. That profile requires `STRIPE_ENABLED=true` and `STRIPE_LIVE=true` at startup. Use an environment without the `prod` profile for sandbox testing.
+
 For local sandbox testing, run Stripe CLI with the sandbox API key and use its signing secret in the backend environment.
 
 ```sh
@@ -811,8 +814,8 @@ For a deployed backend, register the same two snapshot events at `POST /api/paym
 
 ### Customer and shop flow
 
-1. `POST /api/orders` reserves stock and returns `PAYMENT_PENDING`. Retry with the same order idempotency key. Poll `GET /api/orders/{id}/payment` and redirect to the returned `checkoutUrl` when the payment is `OPEN`. Stock is held for up to ten minutes while the customer completes checkout.
-2. On return, poll the order and its payment. Stripe's card authorization moves the order to `PLACED` for the shop. Customers can cancel before payment or while the shop is deciding. A decline leaves the order in `PAYMENT_PENDING` so the customer can retry the same session.
+1. `POST /api/orders` reserves stock and returns `PAYMENT_PENDING`. Retry with the same order idempotency key. Poll `GET /api/orders/{id}/payment` and redirect to the returned `checkoutUrl` when the payment is `OPEN`. Customers have ten minutes to complete checkout.
+2. On return, poll the order and its payment. Stripe's card authorization moves the order to `PLACED` and starts the shop's response window. The worker uses the signed Checkout completion timestamp to honor a timely authorization it verifies after the cutoff. It allows two minutes for missing webhook evidence before voiding an unverified late hold. Customers can cancel before payment or while the shop is deciding. A decline leaves the order in `PAYMENT_PENDING` so the customer can retry the same session.
 3. Shop acceptance moves the order to `CAPTURE_PENDING`. The worker charges only available items plus the checkout fees and any tip. A confirmed capture moves the order to `ACCEPTED`, which lets the shop mark it ready and the driver take the job. Rejection, cancellation or expiration releases the hold or queues a refund for a captured order.
 4. For delivered Stripe orders without a tip, `POST /api/orders/{id}/tip/checkout` with `{"tipCents":200}` starts a separate payment within 24 hours. Poll the same path with `GET`; redirect to its `checkoutUrl`. A successful capture credits the driver's pay period based on the time the tip is processed.
 
@@ -825,16 +828,16 @@ For a deployed backend, register the same two snapshot events at `POST /api/paym
 | Customer tips | Start separate tips through `POST /api/orders/{id}/tip/checkout`. Poll that resource and use its Checkout URL. Update the displayed tip after capture. |
 | Shop orders | Show `CAPTURE_PENDING` after acceptance, including when the order has left the new-order inbox. Refresh until capture resolves. Enable **Ready** when the order is `ACCEPTED`. Keep the unavailable-item selection that determines the final charge. |
 | Driver | Keep assignment tied to the jobs API. Show confirmed tips from pay statements and use the existing delivery workflow. |
-| Admin | Show payment, tip and transfer states, including the reconciliation queues below. Use the Stripe payout endpoints for linked recipients when Stripe is enabled. Show a transfer as queued or transferred based on its backend state. |
+| Admin | Enable cancellation during `CAPTURE_PENDING` and show the resulting void or refund as the payment state updates. Show payment, tip and transfer states and their reconciliation queues. Display `reviewProviderState` when an admin payment detail provides it. Use the Stripe payout endpoints for linked recipients when Stripe is enabled. |
 
-For `429` or transient `503` responses, back off and retry the same checkout attempt. For `409`, refresh the order or quote before offering the next action. An order marked `EXPIRED` together with payment `REVIEW_REQUIRED` should show that payment is under review.
+For `429` or transient `503` responses, back off and retry the same checkout attempt. For `409`, refresh the order or quote before offering the next action. Display `REVIEW_REQUIRED` as payment under review regardless of the order state.
 
 ### Admin payment and settlement
 
 | Method | Path | Result |
 |---|---|---|
-| `GET` | `/api/admin/orders/{id}/payment` | Stripe payment state and provider IDs for one order |
-| `GET` | `/api/admin/orders/{id}/payment/tip` | Stripe payment state and provider IDs for a separate tip |
+| `GET` | `/api/admin/orders/{id}/payment` | Stripe payment state, provider IDs and any reconciliation details for one order |
+| `GET` | `/api/admin/orders/{id}/payment/tip` | Stripe payment state, provider IDs and any reconciliation details for a separate tip |
 | `PUT` | `/api/admin/stripe/recipients/{kind}/{id}` | Link a verified Canadian Stripe Connect account using `{"accountId":"acct_…"}`. Use the shop ID for `SHOP` or the driver user ID for `DRIVER`. |
 | `POST` | `/api/admin/stripe/orders/{id}/transfer` | Queue the delivered order's shop earnings using its captured charge |
 | `POST` | `/api/admin/stripe/driver-payouts/{driverId}/{periodStart}` | Queue a finished period's driver earnings and tips from the platform balance |
@@ -842,9 +845,9 @@ For `429` or transient `503` responses, back off and retry the same checkout att
 | `GET` | `/api/admin/stripe/payment-reviews?page=0&size=20` | Payment and tip attempts that need reconciliation |
 | `GET` | `/api/admin/stripe/transfer-reviews?page=0&size=20` | Transfers that need reconciliation in the configured Stripe mode |
 
-Recipients complete Stripe Connect onboarding before an admin links their Stripe accounts. A confirmed transfer credits the recipient's Stripe balance. Their bank payout follows the connected account's payout schedule. The worker checks the Stripe charge before sending a shop transfer. An already refunded or disputed charge goes to admin review. Chargebacks and adjustments after delivery are handled in Stripe.
+Recipients complete Stripe Connect onboarding before an admin links their Stripe accounts. A confirmed transfer credits the recipient's Stripe balance. Their bank payout follows the connected account's payout schedule. The worker checks the Stripe charge before sending a shop transfer. Refunded or disputed charges and reversed or partially reversed transfers go to admin review. Chargebacks and adjustments after delivery are handled in Stripe.
 
-A capture still unresolved after 30 minutes goes to `REVIEW_REQUIRED`. The order expires and available stock is released. Treat a payment under review as unresolved in the customer UI. Admins can use the review endpoints and the Stripe IDs in the detail endpoints to confirm what happened before issuing any refund or transfer. The worker checks Stripe for an existing refund or transfer after a lost response. It stops sending new requests for an unknown result before Stripe's idempotency key can expire.
+A capture with an unknown outcome after 30 minutes goes to `REVIEW_REQUIRED`. The order expires and available stock is released. If Stripe confirms the capture and QuikE repeatedly fails to save the order update, the payment goes to `REVIEW_REQUIRED` with reason `LOCAL_FINALIZATION_FAILED`, `reviewProviderState: CAPTURED` and the charge ID. The order stays in `CAPTURE_PENDING` until an admin resolves it. Check the provider IDs in Stripe before issuing a refund or transfer. The worker checks Stripe for an existing refund or transfer after a lost response and stops sending new requests for an unknown result before the idempotency key can expire.
 
 `STRIPE_WORKER_CONCURRENCY` defaults to four in-flight jobs per backend instance. Keep this within the service's PostgreSQL and Stripe budgets when adding replicas. Money operations are protected by database claims and Stripe idempotency keys. Checkout, capture, refunds and Connect transfers are covered by the local integration suite against PostgreSQL and an HTTP Stripe simulator.
 
@@ -854,9 +857,9 @@ A capture still unresolved after 30 minutes goes to `REVIEW_REQUIRED`. The order
 
 ### Verified in this release
 
-- **Backend suite.** 132 tests passed using the Maven test suite. Payment integration tests use real PostgreSQL, the HTTP API and a Stripe simulator. They cover webhook signatures, authorization, duplicate requests, competing state changes, retry and recovery, and Connect transfer bookkeeping.
-- **Stripe sandbox.** Verified CAD 25.96 authorized, CAD 19.97 captured after removing an item, and CAD 19.97 refunded. Also verified a card decline, a 3-D Secure authorization followed by a released hold, and a CAD 2.00 post-delivery tip credited to the driver.
-- **Local payment load.** A burst of 96 checkout requests from 24 customers produced 24 Checkout Sessions and 24 captures. No stock was oversold. This run used the Stripe simulator.
+- **Backend suite.** 138 Maven tests passed. Payment integration tests use PostgreSQL, the HTTP API and a Stripe simulator. They cover signed webhooks, delayed authorization, duplicate requests, cancellation during capture, database failures after confirmed capture, provider outages and partially reversed Connect transfers.
+- **Stripe sandbox.** Verified signed completion and expiry webhooks, CAD 25.96 authorized, CAD 19.97 captured after removing an item, and CAD 19.97 refunded. Also verified a card decline, a 3-D Secure authorization followed by a released hold, and a completed shop-to-driver delivery with a separate CAD 2.00 tip credited once to the driver's pay period.
+- **Local payment load.** A burst of 96 checkout requests from 24 customers produced 24 Checkout Sessions and 24 captures with zero HTTP 503 responses and zero oversold stock. This run used the Stripe simulator and a single backend instance.
 
 From `backend/`, run `mvn test` for the full suite or `mvn -Dtest=StripePaymentTest test` for payment and checkout concurrency coverage.
 

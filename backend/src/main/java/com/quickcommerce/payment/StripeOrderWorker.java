@@ -45,6 +45,7 @@ class StripeOrderWorker implements DisposableBean {
     private static final String CAD = "cad";
     private static final Set<Status> CLOSED = Set.of(Status.CANCELLED, Status.REJECTED, Status.EXPIRED);
     private static final int RECHECK_SECONDS = 30;
+    private static final int COMPLETION_GRACE_MINUTES = 2;
     private static final int DRAIN_ROUNDS = 4;
 
     private record Result(State state, String session, String url, String intent, String charge,
@@ -111,36 +112,47 @@ class StripeOrderWorker implements DisposableBean {
     }
 
     private void run(Payment payment) {
+        Result result;
         try {
             Status status = orders.findById(payment.orderId()).orElseThrow().getStatus();
-            boolean tipExpired = payment.kind() == Kind.TIP && payment.state() != State.CAPTURING
-                    && !payment.expiresAt().toInstant().isAfter(Instant.now());
-            Result result = reconcile(payment, CLOSED.contains(status) || tipExpired);
+            // A tip that remains AUTHORIZED has missed its cutoff. Timely tips advance directly to CAPTURING.
+            boolean closeTip = payment.kind() == Kind.TIP && payment.state() == State.AUTHORIZED;
+            result = reconcile(payment, CLOSED.contains(status) || closeTip);
             if (result.state() == payment.state() && result.delaySeconds() != null && retryDeadlinePassed(payment)) {
                 result = result.needsReview("STRIPE_RESULT_UNRESOLVED");
             }
-            finish(payment, result);
         } catch (StripeException e) {
-            if (retryDeadlinePassed(payment)) {
-                log.warn("Stripe operation reached its recovery deadline for order {}, stage {}, HTTP {}, code {}, request {}",
-                        payment.orderId(), payment.state(), e.getStatusCode(), e.getCode(), e.getRequestId());
-                finish(payment, Result.state(State.REVIEW_REQUIRED).needsReview("STRIPE_API_RETRY_DEADLINE"));
-            } else {
-                log.warn("Stripe operation will retry for order {}, stage {}, HTTP {}, code {}, request {}",
-                        payment.orderId(), payment.state(), e.getStatusCode(), e.getCode(), e.getRequestId());
+            log.warn("Stripe operation failed for order {}, stage {}, HTTP {}, code {}, request {}",
+                    payment.orderId(), payment.state(), e.getStatusCode(), e.getCode(), e.getRequestId());
+            if (!retryDeadlinePassed(payment)) {
                 payments.retry(payment);
+                return;
             }
+            result = Result.state(State.REVIEW_REQUIRED).needsReview("STRIPE_API_RETRY_DEADLINE");
         } catch (RuntimeException e) {
             log.error("Payment reconciliation will retry for order {}, stage {}, failure {}",
                     payment.orderId(), payment.state(), e.getClass().getSimpleName());
             payments.retry(payment);
+            return;
+        }
+        Instant observedAt = Instant.now();
+        try {
+            finish(payment, result, observedAt);
+        } catch (RuntimeException e) {
+            log.error("Payment finalization failed for order {}, provider state {}, failure {}",
+                    payment.orderId(), result.state(), e.getClass().getSimpleName());
+            if (retryDeadlinePassed(payment)) {
+                payments.recordFinalizationReview(payment, result.state(), result.session(), result.intent(),
+                        result.charge(), result.refund());
+            } else {
+                payments.retry(payment, result.state() == State.CAPTURED ? result.charge() : null);
+            }
         }
     }
 
     private static boolean retryDeadlinePassed(Payment p) {
         OffsetDateTime deadline = switch (p.state()) {
-            case OPEN, AUTHORIZED ->
-                (p.closingAt() == null ? p.expiresAt() : p.closingAt()).plusHours(1);
+            case OPEN, AUTHORIZED -> (p.closingAt() == null ? p.expiresAt() : p.closingAt()).plusHours(1);
             case CAPTURING -> p.captureUntil() == null ? null : p.captureUntil().plusMinutes(15);
             case CAPTURED -> p.closingAt() == null ? null : p.closingAt().plusHours(20);
             case REFUNDING -> p.closingAt() == null ? null : p.closingAt().plusDays(7);
@@ -150,6 +162,9 @@ class StripeOrderWorker implements DisposableBean {
     }
 
     private Result reconcile(Payment p, boolean closed) throws StripeException {
+        if (p.state() == State.CAPTURING && p.chargeId() != null) {
+            return new Result(State.CAPTURED, null, null, p.intentId(), p.chargeId(), null, null);
+        }
         if (p.state() == State.OPENING) {
             return closed || !Instant.now().isBefore(p.expiresAt().toInstant())
                     ? Result.state(State.VOIDED) : open(p);
@@ -282,7 +297,7 @@ class StripeOrderWorker implements DisposableBean {
                 state == State.REFUNDING ? RECHECK_SECONDS : null);
     }
 
-    private void finish(Payment payment, Result result) {
+    private void finish(Payment payment, Result result, Instant observedAt) {
         tx.executeWithoutResult(ignored -> {
             Order order = orders.findWithLockById(payment.orderId()).orElseThrow();
             payments.lock(payment).ifPresent(current -> {
@@ -291,16 +306,28 @@ class StripeOrderWorker implements DisposableBean {
                 Instant now = Instant.now();
                 switch (state) {
                     case AUTHORIZED -> {
-                        if (payment.kind() == Kind.TIP) {
-                            if (now.isBefore(payment.expiresAt().toInstant())) {
-                                state = State.CAPTURING;
-                            }
+                        if (CLOSED.contains(order.getStatus())) {
                             delay = 0;
-                        } else if (order.getStatus() == Status.PAYMENT_PENDING) {
-                            if (now.isBefore(payment.expiresAt().toInstant())) {
-                                orderService.confirmAuthorization(order.getId(), now);
+                        } else {
+                            boolean timely = observedAt.isBefore(current.expiresAt().toInstant())
+                                    || (current.checkoutCompletedAt() != null
+                                            && current.checkoutCompletedAt().isBefore(current.expiresAt()));
+                            if (timely) {
+                                if (payment.kind() == Kind.TIP) {
+                                    state = State.CAPTURING;
+                                    delay = 0;
+                                } else if (order.getStatus() == Status.PAYMENT_PENDING) {
+                                    orderService.confirmAuthorization(order.getId(), now);
+                                }
+                            } else if (current.checkoutCompletedAt() == null
+                                    && now.isBefore(current.expiresAt().plusMinutes(COMPLETION_GRACE_MINUTES).toInstant())) {
+                                // A completion observed after the cutoff needs Stripe's signed event timestamp.
+                                state = State.OPEN;
+                                delay = 5;
                             } else {
-                                orderService.expirePaymentOrder(order, Status.PAYMENT_PENDING);
+                                if (payment.kind() == Kind.ORDER) {
+                                    orderService.expirePaymentOrder(order, Status.PAYMENT_PENDING);
+                                }
                                 delay = 0;
                             }
                         }
@@ -310,6 +337,8 @@ class StripeOrderWorker implements DisposableBean {
                             payments.creditTip(current);
                         } else if (order.getStatus() == Status.CAPTURE_PENDING) {
                             orderService.confirmCapture(order.getId());
+                        } else if (CLOSED.contains(order.getStatus())) {
+                            delay = 0;
                         }
                     }
                     case REVIEW_REQUIRED, VOIDED -> {
